@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Roulette Club</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg-0:#0b0e14;
+    --bg-1:#131826;
+    --bg-2:#1b2233;
+    --gold:#e8b84b;
+    --gold-dim:#8a6f2c;
+    --text-0:#f1efe8;
+    --text-1:#a9afc0;
+    --danger:#e2554a;
+    --success:#4bbf8a;
+    --radius: 16px;
+    --pad: clamp(14px, 4vw, 28px);
+    --maxw: 720px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin:0; padding:0;
+    background: var(--bg-0);
+    color: var(--text-0);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+
+  #app {
+    max-width: var(--maxw);
+    margin: 0 auto;
+    padding: var(--pad);
+    padding-bottom: calc(var(--pad) + env(safe-area-inset-bottom, 0px));
+    padding-top: calc(var(--pad) + env(safe-area-inset-top, 0px));
+  }
+
+  /* ---------- Loading screen ---------- */
+  #loader {
+    position: fixed; inset: 0;
+    background: var(--bg-0);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 18px;
+    z-index: 50;
+    transition: opacity .5s ease, visibility .5s ease;
+  }
+  #loader.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+
+  .logo-ring {
+    width: clamp(64px, 18vw, 96px);
+    height: clamp(64px, 18vw, 96px);
+    border-radius: 50%;
+    border: 3px solid var(--gold-dim);
+    border-top-color: var(--gold);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .loader-label {
+    font-size: clamp(13px, 3.2vw, 15px);
+    color: var(--text-1);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  .loader-bar-track {
+    width: min(220px, 60vw);
+    height: 3px;
+    background: var(--bg-2);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .loader-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--gold);
+    transition: width .25s ease;
+  }
+
+  /* ---------- Header / profile ---------- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: clamp(18px, 5vw, 28px);
+    flex-wrap: wrap;
+  }
+
+  .id-badge {
+    font-size: clamp(11px, 2.8vw, 13px);
+    color: var(--text-1);
+    letter-spacing: .05em;
+  }
+  .id-badge b { color: var(--gold); font-weight: 600; }
+
+  .avatar {
+    width: clamp(40px, 10vw, 52px);
+    height: clamp(40px, 10vw, 52px);
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--gold), #b9822c);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; color: #1a1406;
+    font-size: clamp(14px, 3.6vw, 18px);
+    flex-shrink: 0;
+  }
+
+  .profile-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .profile-name {
+    font-size: clamp(15px, 4vw, 18px);
+    font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  .balance-card {
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    border-radius: var(--radius);
+    padding: clamp(14px, 4vw, 22px);
+    text-align: center;
+    margin-bottom: clamp(18px, 5vw, 28px);
+  }
+  .balance-label {
+    font-size: clamp(11px, 2.8vw, 13px);
+    color: var(--text-1);
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    margin-bottom: 6px;
+  }
+  .balance-value {
+    font-size: clamp(30px, 9vw, 44px);
+    font-weight: 700;
+    color: var(--gold);
+    font-variant-numeric: tabular-nums;
+    transition: transform .15s ease;
+  }
+  .balance-value.bump { transform: scale(1.08); }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .stat {
+    background: var(--bg-2);
+    border-radius: 10px;
+    padding: 10px 12px;
+    text-align: center;
+  }
+  .stat-num { font-size: clamp(16px, 4vw, 20px); font-weight: 700; }
+  .stat-cap { font-size: clamp(10px, 2.6vw, 12px); color: var(--text-1); margin-top: 2px; }
+
+  /* ---------- Roulette ---------- */
+  .section-title {
+    font-size: clamp(14px, 3.6vw, 16px);
+    font-weight: 600;
+    margin: 0 0 12px;
+    letter-spacing: .02em;
+  }
+
+  .reel {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: clamp(8px, 2.5vw, 14px);
+    margin-bottom: clamp(16px, 4.5vw, 22px);
+  }
+  .reel-cell {
+    aspect-ratio: 1 / 1;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(28px, 9vw, 44px);
+    transition: transform .12s ease, border-color .2s ease;
+  }
+  .reel-cell.win {
+    border-color: var(--gold);
+    box-shadow: 0 0 0 1px var(--gold) inset;
+  }
+  .reel-cell.spinning { animation: pulse .3s ease infinite alternate; }
+  @keyframes pulse { from { transform: scale(1); } to { transform: scale(.94); } }
+
+  .bet-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .chip {
+    flex: 1 1 auto;
+    min-width: 56px;
+    padding: 10px 6px;
+    border-radius: 10px;
+    background: var(--bg-2);
+    border: 1px solid transparent;
+    color: var(--text-0);
+    font-size: clamp(12px, 3.4vw, 14px);
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .chip.active {
+    border-color: var(--gold);
+    background: rgba(232,184,75,0.12);
+    color: var(--gold);
+  }
+
+  .spin-btn {
+    width: 100%;
+    padding: clamp(14px, 4vw, 18px);
+    border: none;
+    border-radius: 14px;
+    background: var(--gold);
+    color: #1a1406;
+    font-size: clamp(15px, 4vw, 17px);
+    font-weight: 700;
+    letter-spacing: .03em;
+    cursor: pointer;
+    transition: transform .1s ease, opacity .2s ease;
+  }
+  .spin-btn:active { transform: scale(.98); }
+  .spin-btn:disabled { opacity: .5; cursor: default; }
+
+  .result-msg {
+    margin-top: 14px;
+    text-align: center;
+    font-size: clamp(13px, 3.6vw, 15px);
+    min-height: 22px;
+    color: var(--text-1);
+  }
+  .result-msg.win { color: var(--success); font-weight: 600; }
+  .result-msg.lose { color: var(--danger); font-weight: 600; }
+
+  .paytable {
+    margin-top: clamp(20px, 5vw, 30px);
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    border-radius: var(--radius);
+    padding: clamp(14px, 4vw, 20px);
+  }
+  .paytable-row {
+    display: flex; justify-content: space-between;
+    font-size: clamp(12px, 3.2vw, 14px);
+    padding: 7px 0;
+    border-bottom: 1px solid var(--bg-2);
+  }
+  .paytable-row:last-child { border-bottom: none; }
+  .paytable-row span:first-child { color: var(--text-1); }
+
+  .footnote {
+    text-align: center;
+    color: var(--text-1);
+    font-size: clamp(10px, 2.6vw, 12px);
+    margin-top: 20px;
+    line-height: 1.5;
+  }
+
+  /* ---------- Tablet / desktop widening ---------- */
+  @media (min-width: 560px) {
+    .reel-cell { font-size: 52px; }
+  }
+  @media (min-width: 900px) {
+    #app { padding-top: 40px; }
+    .balance-card { padding: 28px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="loader">
+  <div class="logo-ring"></div>
+  <div class="loader-label">Roulette Club</div>
+  <div class="loader-bar-track"><div class="loader-bar-fill" id="loaderFill"></div></div>
+</div>
+
+<div id="app">
+
+  <div class="topbar">
+    <div class="profile-row">
+      <div class="avatar" id="avatar">?</div>
+      <div>
+        <div class="profile-name" id="profileName">Гость</div>
+        <div class="id-badge">ID <b id="profileId">—</b></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="balance-card">
+    <div class="balance-label">Баланс</div>
+    <div class="balance-value" id="balanceValue">0</div>
+    <div class="stats-grid">
+      <div class="stat">
+        <div class="stat-num" id="statGames">0</div>
+        <div class="stat-cap">Игр сыграно</div>
+      </div>
+      <div class="stat">
+        <div class="stat-num" id="statBest">0</div>
+        <div class="stat-cap">Лучший выигрыш</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-title">Рулетка</div>
+
+  <div class="reel" id="reel">
+    <div class="reel-cell" id="cell0">🎲</div>
+    <div class="reel-cell" id="cell1">🎲</div>
+    <div class="reel-cell" id="cell2">🎲</div>
+  </div>
+
+  <div class="bet-row" id="betRow"></div>
+
+  <button class="spin-btn" id="spinBtn">Крутить</button>
+  <div class="result-msg" id="resultMsg">Выбери ставку и жми «Крутить»</div>
+
+  <div class="paytable" id="paytable">
+    <div class="section-title" style="margin-bottom:10px;">Таблица выигрышей</div>
+  </div>
+
+  <div class="footnote">
+    Валюта виртуальная и не имеет денежной ценности.<br>
+    Баланс привязан к твоему Telegram-аккаунту.
+  </div>
+
+</div>
+
+<script>
+(function(){
+  var tg = window.Telegram ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  // Секторы рулетки — держи в синхроне с ROULETTE_SECTORS в bot.py
+  var SECTORS = [
+    { symbol: "💥", label: "Мимо",        mult: 0,    weight: 40 },
+    { symbol: "🍒", label: "x1.5",         mult: 1.5,  weight: 25 },
+    { symbol: "🍋", label: "x2",           mult: 2,    weight: 15 },
+    { symbol: "⭐", label: "x3",           mult: 3,    weight: 10 },
+    { symbol: "💎", label: "x5",           mult: 5,    weight: 6 },
+    { symbol: "👑", label: "JACKPOT x10",  mult: 10,   weight: 4 }
+  ];
+
+  var BET_OPTIONS = [10, 25, 50, 100];
+  var STARTING_BALANCE = 100;
+
+  var state = {
+    userId: "0000",
+    name: "Гость",
+    balance: STARTING_BALANCE,
+    games: 0,
+    bestWin: 0,
+    bet: BET_OPTIONS[0],
+    spinning: false
+  };
+
+  // ---------- Идентификация пользователя через Telegram WebApp ----------
+  function initUser(){
+    var u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+    if (u) {
+      state.userId = String(u.id);
+      state.name = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.username || "Игрок";
+    } else {
+      state.userId = "DEMO-" + Math.floor(1000 + Math.random()*9000);
+      state.name = "Гость";
+    }
+    document.getElementById("profileName").textContent = state.name;
+    document.getElementById("profileId").textContent = state.userId;
+    document.getElementById("avatar").textContent = state.name.trim().charAt(0).toUpperCase() || "?";
+  }
+
+  // ---------- Персистентность: Telegram CloudStorage, fallback localStorage ----------
+  function storageKey(){ return "roulette_state_" + state.userId; }
+
+  function loadState(cb){
+    if (tg && tg.CloudStorage) {
+      tg.CloudStorage.getItem(storageKey(), function(err, value){
+        if (!err && value) { applySaved(value); }
+        cb();
+      });
+    } else {
+      try {
+        var raw = localStorage.getItem(storageKey());
+        if (raw) applySaved(raw);
+      } catch(e){}
+      cb();
+    }
+  }
+
+  function applySaved(raw){
+    try {
+      var saved = JSON.parse(raw);
+      if (typeof saved.balance === "number") state.balance = saved.balance;
+      if (typeof saved.games === "number") state.games = saved.games;
+      if (typeof saved.bestWin === "number") state.bestWin = saved.bestWin;
+    } catch(e){}
+  }
+
+  function saveState(){
+    var payload = JSON.stringify({ balance: state.balance, games: state.games, bestWin: state.bestWin });
+    if (tg && tg.CloudStorage) {
+      tg.CloudStorage.setItem(storageKey(), payload, function(){});
+    } else {
+      try { localStorage.setItem(storageKey(), payload); } catch(e){}
+    }
+  }
+
+  // ---------- Рендер ----------
+  function renderBalance(bump){
+    var el = document.getElementById("balanceValue");
+    el.textContent = state.balance;
+    document.getElementById("statGames").textContent = state.games;
+    document.getElementById("statBest").textContent = state.bestWin;
+    if (bump) {
+      el.classList.add("bump");
+      setTimeout(function(){ el.classList.remove("bump"); }, 150);
+    }
+  }
+
+  function renderBetRow(){
+    var row = document.getElementById("betRow");
+    row.innerHTML = "";
+    BET_OPTIONS.forEach(function(v){
+      var chip = document.createElement("div");
+      chip.className = "chip" + (v === state.bet ? " active" : "");
+      chip.textContent = v;
+      chip.onclick = function(){
+        if (state.spinning) return;
+        state.bet = v;
+        renderBetRow();
+      };
+      row.appendChild(chip);
+    });
+  }
+
+  function renderPaytable(){
+    var box = document.getElementById("paytable");
+    box.querySelectorAll(".paytable-row").forEach(function(r){ r.remove(); });
+    SECTORS.forEach(function(s){
+      var row = document.createElement("div");
+      row.className = "paytable-row";
+      row.innerHTML = "<span>" + s.symbol + " " + s.label + "</span><span>" + (s.mult === 0 ? "проигрыш" : "×" + s.mult) + "</span>";
+      box.appendChild(row);
+    });
+  }
+
+  // ---------- Логика рулетки ----------
+  function weightedPick(){
+    var total = SECTORS.reduce(function(a,s){ return a + s.weight; }, 0);
+    var r = Math.random() * total;
+    for (var i=0;i<SECTORS.length;i++){
+      r -= SECTORS[i].weight;
+      if (r <= 0) return SECTORS[i];
+    }
+    return SECTORS[SECTORS.length-1];
+  }
+
+  function setCells(symbol, spinning, win){
+    for (var i=0;i<3;i++){
+      var cell = document.getElementById("cell"+i);
+      cell.textContent = symbol;
+      cell.classList.toggle("spinning", !!spinning);
+      cell.classList.toggle("win", !!win);
+    }
+  }
+
+  function spin(){
+    if (state.spinning) return;
+    if (state.bet > state.balance) {
+      var msg = document.getElementById("resultMsg");
+      msg.className = "result-msg lose";
+      msg.textContent = "Недостаточно баланса для этой ставки";
+      return;
+    }
+
+    state.spinning = true;
+    document.getElementById("spinBtn").disabled = true;
+    document.getElementById("resultMsg").className = "result-msg";
+    document.getElementById("resultMsg").textContent = "Крутим...";
+
+    var result = weightedPick();
+    var ticks = 16;
+    var i = 0;
+
+    function tick(){
+      var randomSymbol = SECTORS[Math.floor(Math.random()*SECTORS.length)].symbol;
+      setCells(randomSymbol, true, false);
+      i++;
+      if (i < ticks) {
+        var delay = 60 + (i / ticks) * 140; // замедление к концу
+        setTimeout(tick, delay);
+      } else {
+        finish();
+      }
+    }
+
+    function finish(){
+      setCells(result.symbol, false, true);
+      var winnings = Math.round(state.bet * result.mult);
+      var delta = winnings - state.bet;
+      state.balance += delta;
+      state.games += 1;
+      if (winnings > state.bestWin) state.bestWin = winnings;
+
+      var msg = document.getElementById("resultMsg");
+      if (result.mult === 0) {
+        msg.className = "result-msg lose";
+        msg.textContent = result.symbol + " " + result.label + " — минус " + state.bet;
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+      } else {
+        msg.className = "result-msg win";
+        msg.textContent = result.symbol + " " + result.label + " — плюс " + winnings + " (чистыми " + (delta>=0?"+":"") + delta + ")";
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+      }
+
+      renderBalance(true);
+      saveState();
+
+      state.spinning = false;
+      document.getElementById("spinBtn").disabled = false;
+    }
+
+    tick();
+  }
+
+  // ---------- Загрузочная анимация ----------
+  function runLoader(done){
+    var fill = document.getElementById("loaderFill");
+    var pct = 0;
+    var iv = setInterval(function(){
+      pct += 8 + Math.random()*14;
+      if (pct >= 100) { pct = 100; clearInterval(iv); }
+      fill.style.width = pct + "%";
+      if (pct >= 100) setTimeout(done, 220);
+    }, 90);
+  }
+
+  // ---------- Инициализация ----------
+  initUser();
+  renderBetRow();
+  renderPaytable();
+  document.getElementById("spinBtn").addEventListener("click", spin);
+
+  loadState(function(){
+    renderBalance(false);
+    runLoader(function(){
+      document.getElementById("loader").classList.add("hidden");
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
