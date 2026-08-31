@@ -380,17 +380,32 @@
   function storageKey(){ return "roulette_state_" + state.userId; }
 
   function loadState(cb){
-    if (tg && tg.CloudStorage) {
+    var done = false;
+    function finish(){
+      if (done) return;
+      done = true;
+      cb();
+    }
+
+    // Доверяем CloudStorage только если реально открыты внутри Telegram
+    // (есть initData пользователя). В обычном браузере telegram-web-app.js
+    // создаёт заглушку, у которой CloudStorage.getItem никогда не вызывает
+    // callback — из-за этого загрузка раньше зависала навсегда.
+    var insideTelegram = !!(tg && tg.initDataUnsafe && tg.initDataUnsafe.user);
+
+    if (insideTelegram && tg.CloudStorage) {
       tg.CloudStorage.getItem(storageKey(), function(err, value){
         if (!err && value) { applySaved(value); }
-        cb();
+        finish();
       });
+      // Подстраховка: если CloudStorage не ответит за 1.5с — не виснем.
+      setTimeout(finish, 1500);
     } else {
       try {
         var raw = localStorage.getItem(storageKey());
         if (raw) applySaved(raw);
       } catch(e){}
-      cb();
+      finish();
     }
   }
 
