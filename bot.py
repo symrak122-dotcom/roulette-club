@@ -30,17 +30,6 @@ index.html обращается туда за балансом и результ
 баланс в приложении и в боте всегда одно и то же число из одной базы.
 Этот API нужно опубликовать по HTTPS-адресу (Render/Railway/свой сервер
 с nginx) и указать этот адрес в константе API_BASE_URL внутри index.html.
-
-Установка зависимостей:
-    pip install -r requirements.txt
-
-Запуск (Windows / PowerShell):
-    $env:BOT_TOKEN="твой_токен_от_BotFather"
-    python bot.py
-
-Запуск (Linux / macOS):
-    export BOT_TOKEN="твой_токен_от_BotFather"
-    python bot.py
 """
 
 import asyncio
@@ -83,7 +72,7 @@ PROXY_URL = os.getenv("BOT_PROXY_URL") or None
 # Как получить бесплатный HTTPS-адрес — см. инструкцию в конце этого файла.
 # Пока не задан — кнопки мини-приложения просто не показываются, бот работает
 # как раньше через обычные команды.
-WEBAPP_URL = os.getenv("BOT_WEBAPP_URL") or None
+WEBAPP_URL = os.getenv("https://symrak122-dotcom.github.io/roulette-club/") or None
 # Например: WEBAPP_URL = "https://твой-юзернейм.github.io/roulette-club/"
 
 # Порт, на котором бот поднимает свой HTTP-API для мини-приложения.
@@ -104,7 +93,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
