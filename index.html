@@ -89,7 +89,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    margin-bottom: clamp(18px, 5vw, 28px);
+    margin-bottom: clamp(14px, 4vw, 20px);
     flex-wrap: wrap;
   }
 
@@ -118,13 +118,24 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
+  .sync-badge {
+    font-size: clamp(10px, 2.6vw, 12px);
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: var(--bg-2);
+    color: var(--text-1);
+    white-space: nowrap;
+  }
+  .sync-badge.live { color: var(--success); }
+  .sync-badge.demo { color: var(--gold); }
+
   .balance-card {
     background: var(--bg-1);
     border: 1px solid var(--bg-2);
     border-radius: var(--radius);
     padding: clamp(14px, 4vw, 22px);
     text-align: center;
-    margin-bottom: clamp(18px, 5vw, 28px);
+    margin-bottom: clamp(16px, 4.5vw, 22px);
   }
   .balance-label {
     font-size: clamp(11px, 2.8vw, 13px);
@@ -157,7 +168,35 @@
   .stat-num { font-size: clamp(16px, 4vw, 20px); font-weight: 700; }
   .stat-cap { font-size: clamp(10px, 2.6vw, 12px); color: var(--text-1); margin-top: 2px; }
 
-  /* ---------- Roulette ---------- */
+  /* ---------- Game tabs ---------- */
+  .tabs {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    margin-bottom: clamp(14px, 4vw, 20px);
+    padding-bottom: 2px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab-btn {
+    flex: 0 0 auto;
+    padding: 9px 14px;
+    border-radius: 12px;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    color: var(--text-1);
+    font-size: clamp(12px, 3.2vw, 14px);
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tab-btn.active {
+    background: rgba(232,184,75,0.12);
+    border-color: var(--gold);
+    color: var(--gold);
+  }
+
   .section-title {
     font-size: clamp(14px, 3.6vw, 16px);
     font-weight: 600;
@@ -165,6 +204,7 @@
     letter-spacing: .02em;
   }
 
+  /* ---------- Stage (reel / single outcome) ---------- */
   .reel {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -187,6 +227,50 @@
   .reel-cell.spinning { animation: pulse .3s ease infinite alternate; }
   @keyframes pulse { from { transform: scale(1); } to { transform: scale(.94); } }
 
+  .single-stage {
+    aspect-ratio: 2.4 / 1;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    border-radius: var(--radius);
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(40px, 14vw, 68px);
+    margin-bottom: clamp(16px, 4.5vw, 22px);
+    transition: border-color .2s ease;
+  }
+  .single-stage.win { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
+  .single-stage.spinning { animation: pulse .3s ease infinite alternate; }
+
+  /* ---------- Picker rows (dice number / coin side / color) ---------- */
+  .picker-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .pick {
+    flex: 1 1 auto;
+    min-width: 44px;
+    padding: 10px 6px;
+    border-radius: 10px;
+    background: var(--bg-2);
+    border: 1px solid transparent;
+    color: var(--text-0);
+    font-size: clamp(13px, 3.6vw, 15px);
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .pick.active {
+    border-color: var(--gold);
+    background: rgba(232,184,75,0.12);
+    color: var(--gold);
+  }
+  .pick.red.active { border-color: var(--danger); background: rgba(226,85,74,0.14); color: #ff8177; }
+  .pick.black.active { border-color: #cfd3e0; background: rgba(255,255,255,0.08); color: #f1efe8; }
+
+  /* ---------- Bet chips ---------- */
   .bet-row {
     display: flex;
     gap: 8px;
@@ -292,6 +376,7 @@
         <div class="id-badge">ID <b id="profileId">—</b></div>
       </div>
     </div>
+    <div class="sync-badge" id="syncBadge">…</div>
   </div>
 
   <div class="balance-card">
@@ -309,13 +394,13 @@
     </div>
   </div>
 
-  <div class="section-title">Рулетка</div>
+  <div class="tabs" id="tabs"></div>
 
-  <div class="reel" id="reel">
-    <div class="reel-cell" id="cell0">🎲</div>
-    <div class="reel-cell" id="cell1">🎲</div>
-    <div class="reel-cell" id="cell2">🎲</div>
-  </div>
+  <div class="section-title" id="gameTitle">Рулетка</div>
+
+  <div id="stage"></div>
+
+  <div class="picker-row" id="pickerRow" style="display:none;"></div>
 
   <div class="bet-row" id="betRow"></div>
 
@@ -328,7 +413,7 @@
 
   <div class="footnote">
     Валюта виртуальная и не имеет денежной ценности.<br>
-    Баланс привязан к твоему Telegram-аккаунту.
+    Баланс привязан к твоему Telegram-аккаунту и совпадает с балансом в боте.
   </div>
 
 </div>
@@ -338,8 +423,20 @@
   var tg = window.Telegram ? window.Telegram.WebApp : null;
   if (tg) { tg.ready(); tg.expand(); }
 
-  // Секторы рулетки — держи в синхроне с ROULETTE_SECTORS в bot.py
-  var SECTORS = [
+  // ==========================================================================
+  // НАСТРОЙКА: адрес API бота (см. секцию "HTTP-API для мини-приложения" в
+  // bot.py). Пока сюда не вписан реальный HTTPS-адрес, приложение работает
+  // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
+  // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
+  // ==========================================================================
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
+  var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
+
+  var BET_OPTIONS = [10, 25, 50, 100];
+  var STARTING_BALANCE = 100;
+
+  // ---- Описание игр: множители синхронизированы с bot.py ----
+  var ROULETTE_SECTORS = [
     { symbol: "💥", label: "Мимо",        mult: 0,    weight: 40 },
     { symbol: "🍒", label: "x1.5",         mult: 1.5,  weight: 25 },
     { symbol: "🍋", label: "x2",           mult: 2,    weight: 15 },
@@ -347,23 +444,48 @@
     { symbol: "💎", label: "x5",           mult: 5,    weight: 6 },
     { symbol: "👑", label: "JACKPOT x10",  mult: 10,   weight: 4 }
   ];
+  var SLOT_SYMBOLS = [
+    { symbol: "🍋", weight: 30 },
+    { symbol: "🍒", weight: 25 },
+    { symbol: "🔔", weight: 20 },
+    { symbol: "⭐", weight: 15 },
+    { symbol: "💎", weight: 8 },
+    { symbol: "7️⃣", weight: 2 }
+  ];
+  var SLOT_TRIPLE_MULT = { "🍋":3, "🍒":4, "🔔":6, "⭐":10, "💎":20, "7️⃣":50 };
+  var SLOT_PAIR_MULT = 1.2;
+  var DICE_WIN_MULT = 5.0;
+  var COINFLIP_WIN_MULT = 1.9;
+  var BLACKRED_WIN_MULT = 2.0;
 
-  var BET_OPTIONS = [10, 25, 50, 100];
-  var STARTING_BALANCE = 100;
+  var GAMES = {
+    roulette: { title: "Рулетка", pick: null },
+    dice:     { title: "Кости", pick: "dice" },
+    slots:    { title: "Слоты", pick: null },
+    coinflip: { title: "Монетка", pick: "coin" },
+    blackred: { title: "Чёрное/красное", pick: "color" }
+  };
+  var GAME_ORDER = ["roulette", "dice", "slots", "coinflip", "blackred"];
 
   var state = {
     userId: "0000",
     name: "Гость",
+    initData: "",
     balance: STARTING_BALANCE,
     games: 0,
     bestWin: 0,
     bet: BET_OPTIONS[0],
+    game: "roulette",
+    dicePick: 4,
+    coinPick: "орёл",
+    colorPick: "red",
     spinning: false
   };
 
   // ---------- Идентификация пользователя через Telegram WebApp ----------
   function initUser(){
     var u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user;
+    state.initData = (tg && tg.initData) || "";
     if (u) {
       state.userId = String(u.id);
       state.name = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.username || "Игрок";
@@ -376,8 +498,39 @@
     document.getElementById("avatar").textContent = state.name.trim().charAt(0).toUpperCase() || "?";
   }
 
-  // ---------- Персистентность: Telegram CloudStorage, fallback localStorage ----------
-  function storageKey(){ return "roulette_state_" + state.userId; }
+  // ---------- Синхронизация с ботом через API, либо демо-режим ----------
+  function setSyncBadge(mode){
+    var el = document.getElementById("syncBadge");
+    if (mode === "live") {
+      el.className = "sync-badge live";
+      el.textContent = "🔌 Синхронизировано с ботом";
+    } else if (mode === "checking") {
+      el.className = "sync-badge";
+      el.textContent = "… проверка связи";
+    } else {
+      el.className = "sync-badge demo";
+      el.textContent = "🧪 Демо-режим (без бота)";
+    }
+  }
+
+  function canUseApi(){
+    return API_CONFIGURED && !!state.initData;
+  }
+
+  function apiCall(path, extra, cb){
+    var body = Object.assign({ initData: state.initData }, extra || {});
+    fetch(API_BASE_URL + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function(res){
+      return res.json().then(function(data){ return { ok: res.ok, data: data }; });
+    }).then(function(r){
+      cb(r.ok ? null : (r.data && r.data.error) || "error", r.data);
+    }).catch(function(err){
+      cb(String(err), null);
+    });
+  }
 
   function loadState(cb){
     var done = false;
@@ -387,47 +540,29 @@
       cb();
     }
 
-    // Доверяем CloudStorage только если реально открыты внутри Telegram
-    // (есть initData пользователя). В обычном браузере telegram-web-app.js
-    // создаёт заглушку, у которой CloudStorage.getItem никогда не вызывает
-    // callback — из-за этого загрузка раньше зависала навсегда.
-    var insideTelegram = !!(tg && tg.initDataUnsafe && tg.initDataUnsafe.user);
-
-    if (insideTelegram && tg.CloudStorage) {
-      tg.CloudStorage.getItem(storageKey(), function(err, value){
-        if (!err && value) { applySaved(value); }
+    if (canUseApi()) {
+      setSyncBadge("checking");
+      apiCall("/api/state", {}, function(err, data){
+        if (!err && data) {
+          state.balance = data.balance;
+          state.games = data.games_played;
+          state.bestWin = data.best_win;
+          if (data.internal_id) document.getElementById("profileId").textContent = data.internal_id;
+          setSyncBadge("live");
+        } else {
+          setSyncBadge("demo");
+        }
         finish();
       });
-      // Подстраховка: если CloudStorage не ответит за 1.5с — не виснем.
-      setTimeout(finish, 1500);
+      // Подстраховка: если сервер не ответит вовремя — не виснем на загрузке.
+      setTimeout(finish, 4000);
     } else {
-      try {
-        var raw = localStorage.getItem(storageKey());
-        if (raw) applySaved(raw);
-      } catch(e){}
+      setSyncBadge("demo");
       finish();
     }
   }
 
-  function applySaved(raw){
-    try {
-      var saved = JSON.parse(raw);
-      if (typeof saved.balance === "number") state.balance = saved.balance;
-      if (typeof saved.games === "number") state.games = saved.games;
-      if (typeof saved.bestWin === "number") state.bestWin = saved.bestWin;
-    } catch(e){}
-  }
-
-  function saveState(){
-    var payload = JSON.stringify({ balance: state.balance, games: state.games, bestWin: state.bestWin });
-    if (tg && tg.CloudStorage) {
-      tg.CloudStorage.setItem(storageKey(), payload, function(){});
-    } else {
-      try { localStorage.setItem(storageKey(), payload); } catch(e){}
-    }
-  }
-
-  // ---------- Рендер ----------
+  // ---------- Рендер шапки/баланса ----------
   function renderBalance(bump){
     var el = document.getElementById("balanceValue");
     el.textContent = state.balance;
@@ -455,38 +590,210 @@
     });
   }
 
-  function renderPaytable(){
-    var box = document.getElementById("paytable");
-    box.querySelectorAll(".paytable-row").forEach(function(r){ r.remove(); });
-    SECTORS.forEach(function(s){
-      var row = document.createElement("div");
-      row.className = "paytable-row";
-      row.innerHTML = "<span>" + s.symbol + " " + s.label + "</span><span>" + (s.mult === 0 ? "проигрыш" : "×" + s.mult) + "</span>";
-      box.appendChild(row);
+  // ---------- Табы игр ----------
+  function renderTabs(){
+    var wrap = document.getElementById("tabs");
+    wrap.innerHTML = "";
+    GAME_ORDER.forEach(function(key){
+      var btn = document.createElement("div");
+      btn.className = "tab-btn" + (key === state.game ? " active" : "");
+      btn.textContent = GAMES[key].title;
+      btn.onclick = function(){
+        if (state.spinning) return;
+        state.game = key;
+        switchGame();
+      };
+      wrap.appendChild(btn);
     });
   }
 
-  // ---------- Логика рулетки ----------
-  function weightedPick(){
-    var total = SECTORS.reduce(function(a,s){ return a + s.weight; }, 0);
-    var r = Math.random() * total;
-    for (var i=0;i<SECTORS.length;i++){
-      r -= SECTORS[i].weight;
-      if (r <= 0) return SECTORS[i];
-    }
-    return SECTORS[SECTORS.length-1];
+  function switchGame(){
+    renderTabs();
+    document.getElementById("gameTitle").textContent = GAMES[state.game].title;
+    renderStageIdle();
+    renderPicker();
+    renderPaytable();
+    var msg = document.getElementById("resultMsg");
+    msg.className = "result-msg";
+    msg.textContent = "Выбери ставку и жми «Крутить»";
   }
 
-  function setCells(symbol, spinning, win){
+  // ---------- Пикеры (число кости / орёл-решка / цвет) ----------
+  function renderPicker(){
+    var row = document.getElementById("pickerRow");
+    var kind = GAMES[state.game].pick;
+    row.innerHTML = "";
+    if (!kind) { row.style.display = "none"; return; }
+    row.style.display = "flex";
+
+    if (kind === "dice") {
+      for (var n = 1; n <= 6; n++) {
+        (function(n){
+          var el = document.createElement("div");
+          el.className = "pick" + (state.dicePick === n ? " active" : "");
+          el.textContent = n;
+          el.onclick = function(){
+            if (state.spinning) return;
+            state.dicePick = n;
+            renderPicker();
+          };
+          row.appendChild(el);
+        })(n);
+      }
+    } else if (kind === "coin") {
+      ["орёл", "решка"].forEach(function(v){
+        var el = document.createElement("div");
+        el.className = "pick" + (state.coinPick === v ? " active" : "");
+        el.textContent = v === "орёл" ? "🦅 Орёл" : "🔵 Решка";
+        el.onclick = function(){
+          if (state.spinning) return;
+          state.coinPick = v;
+          renderPicker();
+        };
+        row.appendChild(el);
+      });
+    } else if (kind === "color") {
+      [["red","🔴 Красное"],["black","⚫ Чёрное"]].forEach(function(pair){
+        var el = document.createElement("div");
+        el.className = "pick " + pair[0] + (state.colorPick === pair[0] ? " active" : "");
+        el.textContent = pair[1];
+        el.onclick = function(){
+          if (state.spinning) return;
+          state.colorPick = pair[0];
+          renderPicker();
+        };
+        row.appendChild(el);
+      });
+    }
+  }
+
+  // ---------- Таблицы выплат ----------
+  function renderPaytable(){
+    var box = document.getElementById("paytable");
+    box.querySelectorAll(".paytable-row").forEach(function(r){ r.remove(); });
+
+    function row(a, b){
+      var r = document.createElement("div");
+      r.className = "paytable-row";
+      r.innerHTML = "<span>" + a + "</span><span>" + b + "</span>";
+      box.appendChild(r);
+    }
+
+    if (state.game === "roulette") {
+      ROULETTE_SECTORS.forEach(function(s){
+        row(s.symbol + " " + s.label, s.mult === 0 ? "проигрыш" : "×" + s.mult);
+      });
+    } else if (state.game === "slots") {
+      Object.keys(SLOT_TRIPLE_MULT).forEach(function(sym){
+        row(sym + sym + sym + " три одинаковых", "×" + SLOT_TRIPLE_MULT[sym]);
+      });
+      row("любая пара из трёх", "×" + SLOT_PAIR_MULT);
+    } else if (state.game === "dice") {
+      row("🎲 угадал число (1 из 6)", "×" + DICE_WIN_MULT);
+      row("не угадал", "проигрыш");
+    } else if (state.game === "coinflip") {
+      row("🪙 угадал сторону (50/50)", "×" + COINFLIP_WIN_MULT);
+      row("не угадал", "проигрыш");
+    } else if (state.game === "blackred") {
+      row("🔴 / ⚫ угадал цвет (18/37)", "×" + BLACKRED_WIN_MULT);
+      row("🟢 зеро или мимо", "проигрыш");
+    }
+  }
+
+  // ---------- Stage (визуальная область результата) ----------
+  function renderStageIdle(){
+    var stage = document.getElementById("stage");
+    if (state.game === "roulette" || state.game === "slots") {
+      stage.innerHTML =
+        '<div class="reel"><div class="reel-cell" id="cell0">🎲</div>' +
+        '<div class="reel-cell" id="cell1">🎲</div>' +
+        '<div class="reel-cell" id="cell2">🎲</div></div>';
+    } else if (state.game === "dice") {
+      stage.innerHTML = '<div class="single-stage" id="stageSingle">🎲</div>';
+    } else if (state.game === "coinflip") {
+      stage.innerHTML = '<div class="single-stage" id="stageSingle">🪙</div>';
+    } else if (state.game === "blackred") {
+      stage.innerHTML = '<div class="single-stage" id="stageSingle">🎡</div>';
+    }
+  }
+
+  function setReelCells(symbol, spinning, win){
     for (var i=0;i<3;i++){
       var cell = document.getElementById("cell"+i);
+      if (!cell) continue;
       cell.textContent = symbol;
       cell.classList.toggle("spinning", !!spinning);
       cell.classList.toggle("win", !!win);
     }
   }
 
-  function spin(){
+  function setReelCellsEach(symbols, win){
+    for (var i=0;i<3;i++){
+      var cell = document.getElementById("cell"+i);
+      if (!cell) continue;
+      cell.textContent = symbols[i];
+      cell.classList.remove("spinning");
+      cell.classList.toggle("win", !!win);
+    }
+  }
+
+  function setSingleStage(symbol, spinning, win){
+    var el = document.getElementById("stageSingle");
+    if (!el) return;
+    el.textContent = symbol;
+    el.classList.toggle("spinning", !!spinning);
+    el.classList.toggle("win", !!win);
+  }
+
+  // ---------- Локальные (демо) генераторы — используются только когда
+  // API не настроен или недоступен, чтобы приложение можно было
+  // посмотреть без бота. Вероятности совпадают с bot.py. ----------
+  function weightedPick(list){
+    var total = list.reduce(function(a,s){ return a + s.weight; }, 0);
+    var r = Math.random() * total;
+    for (var i=0;i<list.length;i++){
+      r -= list[i].weight;
+      if (r <= 0) return list[i];
+    }
+    return list[list.length-1];
+  }
+
+  function localPlay(game, bet){
+    if (game === "roulette") {
+      var sector = weightedPick(ROULETTE_SECTORS);
+      var winnings = Math.round(bet * sector.mult);
+      return { winnings: winnings, resultName: sector.label, extra: { symbol: sector.symbol } };
+    }
+    if (game === "dice") {
+      var roll = 1 + Math.floor(Math.random()*6);
+      var win = roll === state.dicePick;
+      return { winnings: win ? Math.round(bet*DICE_WIN_MULT) : 0, extra: { roll: roll, win: win } };
+    }
+    if (game === "slots") {
+      var final = [weightedPick(SLOT_SYMBOLS).symbol, weightedPick(SLOT_SYMBOLS).symbol, weightedPick(SLOT_SYMBOLS).symbol];
+      var w = 0;
+      if (final[0]===final[1] && final[1]===final[2]) w = Math.round(bet * (SLOT_TRIPLE_MULT[final[0]]||3));
+      else if (final[0]===final[1] || final[1]===final[2] || final[0]===final[2]) w = Math.round(bet*SLOT_PAIR_MULT);
+      return { winnings: w, extra: { reels: final } };
+    }
+    if (game === "coinflip") {
+      var result = Math.random() < 0.5 ? "орёл" : "решка";
+      var w2 = result === state.coinPick ? Math.round(bet*COINFLIP_WIN_MULT) : 0;
+      return { winnings: w2, extra: { result: result } };
+    }
+    if (game === "blackred") {
+      var pool = [];
+      for (var a=0;a<18;a++) pool.push("red");
+      for (var b=0;b<18;b++) pool.push("black");
+      pool.push("green");
+      var res = pool[Math.floor(Math.random()*pool.length)];
+      var w3 = res === state.colorPick ? Math.round(bet*BLACKRED_WIN_MULT) : 0;
+      return { winnings: w3, extra: { result: res } };
+    }
+  }
+
+  // ---------- Игровой цикл ----------
+  function play(){
     if (state.spinning) return;
     if (state.bet > state.balance) {
       var msg = document.getElementById("resultMsg");
@@ -500,49 +807,134 @@
     document.getElementById("resultMsg").className = "result-msg";
     document.getElementById("resultMsg").textContent = "Крутим...";
 
-    var result = weightedPick();
-    var ticks = 16;
-    var i = 0;
+    var game = state.game;
+    var bet = state.bet;
+    var payload = { game: game, bet: bet };
+    if (game === "dice") payload.guess = state.dicePick;
+    if (game === "coinflip") payload.choice = state.coinPick;
+    if (game === "blackred") payload.choice = state.colorPick;
 
+    runSpinAnimation(game, function(){
+      if (canUseApi()) {
+        apiCall("/api/play", payload, function(err, data){
+          if (err || !data) {
+            // Сервер недоступен — переходим в демо, чтобы не зависать.
+            setSyncBadge("demo");
+            finishWithLocal(game, bet);
+            return;
+          }
+          finishWithServer(game, data);
+        });
+      } else {
+        finishWithLocal(game, bet);
+      }
+    });
+  }
+
+  function runSpinAnimation(game, done){
+    var ticks = 14;
+    var i = 0;
     function tick(){
-      var randomSymbol = SECTORS[Math.floor(Math.random()*SECTORS.length)].symbol;
-      setCells(randomSymbol, true, false);
+      if (game === "roulette") {
+        var s = ROULETTE_SECTORS[Math.floor(Math.random()*ROULETTE_SECTORS.length)].symbol;
+        setReelCells(s, true, false);
+      } else if (game === "slots") {
+        var syms = [
+          SLOT_SYMBOLS[Math.floor(Math.random()*SLOT_SYMBOLS.length)].symbol,
+          SLOT_SYMBOLS[Math.floor(Math.random()*SLOT_SYMBOLS.length)].symbol,
+          SLOT_SYMBOLS[Math.floor(Math.random()*SLOT_SYMBOLS.length)].symbol
+        ];
+        setReelCellsEach(syms, false);
+      } else if (game === "dice") {
+        setSingleStage(String(1 + Math.floor(Math.random()*6)), true, false);
+      } else if (game === "coinflip") {
+        setSingleStage(i % 2 === 0 ? "🪙" : "◐", true, false);
+      } else if (game === "blackred") {
+        var colors = ["🔴","⚫","🔴","⚫","🟢"];
+        setSingleStage(colors[Math.floor(Math.random()*colors.length)], true, false);
+      }
       i++;
       if (i < ticks) {
-        var delay = 60 + (i / ticks) * 140; // замедление к концу
-        setTimeout(tick, delay);
+        setTimeout(tick, 60 + (i/ticks)*140);
       } else {
-        finish();
+        done();
       }
     }
-
-    function finish(){
-      setCells(result.symbol, false, true);
-      var winnings = Math.round(state.bet * result.mult);
-      var delta = winnings - state.bet;
-      state.balance += delta;
-      state.games += 1;
-      if (winnings > state.bestWin) state.bestWin = winnings;
-
-      var msg = document.getElementById("resultMsg");
-      if (result.mult === 0) {
-        msg.className = "result-msg lose";
-        msg.textContent = result.symbol + " " + result.label + " — минус " + state.bet;
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
-      } else {
-        msg.className = "result-msg win";
-        msg.textContent = result.symbol + " " + result.label + " — плюс " + winnings + " (чистыми " + (delta>=0?"+":"") + delta + ")";
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
-      }
-
-      renderBalance(true);
-      saveState();
-
-      state.spinning = false;
-      document.getElementById("spinBtn").disabled = false;
-    }
-
     tick();
+  }
+
+  function applyBalance(newBalance, games, bestWin, bump){
+    state.balance = newBalance;
+    if (typeof games === "number") state.games = games;
+    if (typeof bestWin === "number") state.bestWin = bestWin;
+    renderBalance(bump);
+  }
+
+  function showOutcome(game, winnings, bet, extraLabel){
+    var delta = winnings - bet;
+    var msg = document.getElementById("resultMsg");
+    if (winnings > 0) {
+      msg.className = "result-msg win";
+      msg.textContent = extraLabel + " — выигрыш +" + winnings + " (чистыми " + (delta>=0?"+":"") + delta + ")";
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+    } else {
+      msg.className = "result-msg lose";
+      msg.textContent = extraLabel + " — минус " + bet;
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+    }
+    state.spinning = false;
+    document.getElementById("spinBtn").disabled = false;
+  }
+
+  function finishWithServer(game, data){
+    var win = data.winnings > 0;
+    if (game === "roulette") {
+      var sector = ROULETTE_SECTORS.filter(function(s){ return s.label === data.resultName; })[0];
+      setReelCells(sector ? sector.symbol : "❔", false, win);
+      showOutcome(game, data.winnings, data.bet, (sector ? sector.symbol + " " + sector.label : data.resultName));
+    } else if (game === "slots") {
+      setReelCellsEach(data.reels, win);
+      showOutcome(game, data.winnings, data.bet, data.reels.join(" "));
+    } else if (game === "dice") {
+      setSingleStage(String(data.roll), false, win);
+      showOutcome(game, data.winnings, data.bet, "Выпало " + data.roll + " (ты ставил на " + data.guess + ")");
+    } else if (game === "coinflip") {
+      setSingleStage(data.result === "орёл" ? "🦅" : "🔵", false, win);
+      showOutcome(game, data.winnings, data.bet, "Выпало: " + data.result);
+    } else if (game === "blackred") {
+      var symMap = { red: "🔴", black: "⚫", green: "🟢" };
+      var labelMap = { red: "Красное", black: "Чёрное", green: "Зеро" };
+      setSingleStage(symMap[data.result], false, win);
+      showOutcome(game, data.winnings, data.bet, symMap[data.result] + " " + labelMap[data.result]);
+    }
+    applyBalance(data.balance, data.games_played, data.best_win, true);
+  }
+
+  function finishWithLocal(game, bet){
+    var r = localPlay(game, bet);
+    var win = r.winnings > 0;
+    if (game === "roulette") {
+      setReelCells(r.extra.symbol, false, win);
+      showOutcome(game, r.winnings, bet, r.extra.symbol + " " + r.resultName);
+    } else if (game === "slots") {
+      setReelCellsEach(r.extra.reels, win);
+      showOutcome(game, r.winnings, bet, r.extra.reels.join(" "));
+    } else if (game === "dice") {
+      setSingleStage(String(r.extra.roll), false, win);
+      showOutcome(game, r.winnings, bet, "Выпало " + r.extra.roll + " (ты ставил на " + state.dicePick + ")");
+    } else if (game === "coinflip") {
+      setSingleStage(r.extra.result === "орёл" ? "🦅" : "🔵", false, win);
+      showOutcome(game, r.winnings, bet, "Выпало: " + r.extra.result);
+    } else if (game === "blackred") {
+      var symMap = { red: "🔴", black: "⚫", green: "🟢" };
+      var labelMap = { red: "Красное", black: "Чёрное", green: "Зеро" };
+      setSingleStage(symMap[r.extra.result], false, win);
+      showOutcome(game, r.winnings, bet, symMap[r.extra.result] + " " + labelMap[r.extra.result]);
+    }
+    var newBalance = state.balance + (r.winnings - bet);
+    var newGames = state.games + 1;
+    var newBest = Math.max(state.bestWin, r.winnings);
+    applyBalance(newBalance, newGames, newBest, true);
   }
 
   // ---------- Загрузочная анимация ----------
@@ -559,9 +951,12 @@
 
   // ---------- Инициализация ----------
   initUser();
+  renderTabs();
   renderBetRow();
+  renderStageIdle();
+  renderPicker();
   renderPaytable();
-  document.getElementById("spinBtn").addEventListener("click", spin);
+  document.getElementById("spinBtn").addEventListener("click", play);
 
   loadState(function(){
     renderBalance(false);
