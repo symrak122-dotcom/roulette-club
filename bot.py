@@ -86,7 +86,7 @@ WEBAPP_URL = os.getenv("https://symrak122-dotcom.github.io/roulette-club/") or N
 # PORT и требуют, чтобы сервис слушал именно её — иначе деплой считается
 # неудачным. Поэтому PORT имеет приоритет, а API_PORT — запасной вариант
 # для хостингов, где порт не навязывается.
-API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
+API_PORT = int(os.getenv("PORT") or os.getenv("https://respectful-charisma-production-0bf7.up.railway.app", "8080"))
 
 # ID администраторов, которым разрешено создавать промокоды.
 # Узнать свой Telegram ID можно у бота @userinfobot — впиши число сюда.
