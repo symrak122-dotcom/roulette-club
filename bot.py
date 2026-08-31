@@ -1,0 +1,1468 @@
+"""
+Telegram-бот: профили пользователей + мини-игры казино (виртуальная валюта) + анимации.
+
+ВАЖНО:
+- Это ИГРОВАЯ механика с виртуальными очками, НЕ имеющими денежной стоимости
+  и не привязанными к реальным платежам или подаркам Telegram.
+- Никакого приёма реальных денег/подарков здесь нет и не должно быть.
+- Каждая игра — честный random(), с реальным шансом как выиграть, так и
+  проиграть ставку. Никаких "гарантированных" исходов.
+
+Игры:
+- 🎰 Рулетка       /roulette [ставка]
+- 🎲 Кости         /dice [ставка] [1-6]  — родная Telegram-анимация кубика
+- 🎯 Слоты         /slots [ставка]
+- 🪙 Монетка       /coinflip [ставка] [орёл|решка]
+- 🔴⚫ Чёрное/красное /blackred [ставка] [красное|чёрное]
+
+Прочее:
+- /start   — создание профиля (уникальный ID) + анимация загрузки
+- /profile — просмотр своего профиля (ID, баланс, кол-во игр)
+- /games   — меню всех игр
+- /help    — список команд
+
+Хранилище: SQLite (файл bot_database.db), создаётся автоматически.
+
+Мини-приложение (index.html) синхронизировано с ботом: бот поднимает
+собственный HTTP-API (см. секцию "HTTP-API для мини-приложения" ниже)
+на порту из переменной окружения API_PORT (по умолчанию 8080), и
+index.html обращается туда за балансом и результатами игр — так что
+баланс в приложении и в боте всегда одно и то же число из одной базы.
+Этот API нужно опубликовать по HTTPS-адресу (Render/Railway/свой сервер
+с nginx) и указать этот адрес в константе API_BASE_URL внутри index.html.
+
+Установка зависимостей:
+    pip install -r requirements.txt
+
+Запуск (Windows / PowerShell):
+    $env:BOT_TOKEN="твой_токен_от_BotFather"
+    python bot.py
+
+Запуск (Linux / macOS):
+    export BOT_TOKEN="твой_токен_от_BotFather"
+    python bot.py
+"""
+
+import asyncio
+import hashlib
+import hmac
+import json
+import logging
+import os
+import random
+import sqlite3
+import threading
+import urllib.parse
+from contextlib import closing
+from datetime import datetime
+
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.error import BadRequest
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+
+# ---------------------------------------------------------------------------
+# Настройки
+# ---------------------------------------------------------------------------
+
+TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_ЗДЕСЬ")
+DB_PATH = "bot_database.db"
+
+# Если api.telegram.org недоступен напрямую, укажи прокси, например:
+#   PROXY_URL = "http://127.0.0.1:8080"
+# Можно также задать через переменную окружения BOT_PROXY_URL.
+PROXY_URL = os.getenv("BOT_PROXY_URL") or None
+
+# Адрес веб-страницы мини-приложения (Telegram Mini App).
+# ОБЯЗАТЕЛЬНО должен быть https:// — Telegram не открывает http:// и localhost.
+# Как получить бесплатный HTTPS-адрес — см. инструкцию в конце этого файла.
+# Пока не задан — кнопки мини-приложения просто не показываются, бот работает
+# как раньше через обычные команды.
+WEBAPP_URL = os.getenv("BOT_WEBAPP_URL") or None
+# Например: WEBAPP_URL = "https://твой-юзернейм.github.io/roulette-club/"
+
+# Порт, на котором бот поднимает свой HTTP-API для мини-приложения.
+# Мини-приложение (index.html на GitHub Pages) обращается сюда, чтобы
+# баланс в приложении и в самом боте всегда были одним и тем же числом
+# из базы данных, а не двумя независимыми копиями.
+# Этот сервер нужно сделать доступным по HTTPS-адресу (например, через
+# Render/Railway/свой VPS с nginx) и указать этот адрес в index.html —
+# см. константу API_BASE_URL в конце файла index.html.
+# Render (и некоторые другие PaaS) сами назначают порт через переменную
+# PORT и требуют, чтобы сервис слушал именно её — иначе деплой считается
+# неудачным. Поэтому PORT имеет приоритет, а API_PORT — запасной вариант
+# для хостингов, где порт не навязывается.
+API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
+
+# ID администраторов, которым разрешено создавать промокоды.
+# Узнать свой Telegram ID можно у бота @userinfobot — впиши число сюда.
+# Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
+# например: BOT_ADMIN_IDS="123456789,987654321"
+ADMIN_IDS = {
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
+}
+# Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
+
+STARTING_BALANCE = 100
+DEFAULT_BET = 10
+
+# --- Рулетка: (название, множитель, вес шанса) ---
+ROULETTE_SECTORS = [
+    ("💥 Мимо",        0.0, 40),
+    ("🍒 x1.5",         1.5, 25),
+    ("🍋 x2",           2.0, 15),
+    ("⭐ x3",           3.0, 10),
+    ("💎 x5",           5.0, 6),
+    ("👑 JACKPOT x10", 10.0, 4),
+]
+
+# --- Кости: выигрыш при угадывании грани 1-6, множитель настраивается ---
+DICE_WIN_MULTIPLIER = 5.0  # шанс угадать 1/6
+
+# --- Слоты: символы барабанов и их вес (одинаковый для каждого барабана) ---
+SLOT_SYMBOLS = [
+    ("🍋", 30),
+    ("🍒", 25),
+    ("🔔", 20),
+    ("⭐", 15),
+    ("💎", 8),
+    ("7️⃣", 2),
+]
+SLOT_TRIPLE_MULTIPLIER = {
+    "🍋": 3, "🍒": 4, "🔔": 6, "⭐": 10, "💎": 20, "7️⃣": 50,
+}
+SLOT_PAIR_MULTIPLIER = 1.2
+
+# --- Монетка: 50/50 ---
+COINFLIP_WIN_MULTIPLIER = 1.9
+
+# --- Чёрное/красное: классическая рулеточная раскладка (европейская, зеро одно) ---
+# 18 красных + 18 чёрных + 1 зелёное зеро = 37 секторов.
+BLACKRED_RED_COUNT = 18
+BLACKRED_BLACK_COUNT = 18
+BLACKRED_GREEN_COUNT = 1
+BLACKRED_WIN_MULTIPLIER = 2.0
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Безопасное редактирование сообщений
+# ---------------------------------------------------------------------------
+
+async def safe_edit(msg, text: str, parse_mode: str = None) -> None:
+    """Редактирует сообщение, тихо игнорируя ошибку 'message is not modified'
+    и любые другие временные сбои сети — чтобы анимация никогда не роняла
+    обработчик."""
+    try:
+        await msg.edit_text(text, parse_mode=parse_mode)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            logger.warning("edit_text BadRequest: %s", e)
+    except Exception as e:
+        logger.warning("edit_text failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# База данных
+# ---------------------------------------------------------------------------
+
+def init_db() -> None:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                internal_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id   INTEGER UNIQUE NOT NULL,
+                username      TEXT,
+                first_name    TEXT,
+                balance       INTEGER NOT NULL DEFAULT 0,
+                games_played  INTEGER NOT NULL DEFAULT 0,
+                created_at    TEXT NOT NULL
+            )
+            """
+        )
+        # Миграция для баз, созданных до появления бана/варнов
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+        if "banned" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
+        if "ban_reason" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT")
+        if "warnings" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN warnings INTEGER NOT NULL DEFAULT 0")
+        if "best_win" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN best_win INTEGER NOT NULL DEFAULT 0")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code          TEXT PRIMARY KEY,
+                amount        INTEGER NOT NULL,
+                max_uses      INTEGER NOT NULL,
+                used_count    INTEGER NOT NULL DEFAULT 0,
+                created_by    INTEGER NOT NULL,
+                created_at    TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_redemptions (
+                code          TEXT NOT NULL,
+                telegram_id   INTEGER NOT NULL,
+                redeemed_at   TEXT NOT NULL,
+                PRIMARY KEY (code, telegram_id)
+            )
+            """
+        )
+        conn.commit()
+
+
+def get_or_create_user(telegram_id: int, username: str, first_name: str) -> sqlite3.Row:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+        row = cur.fetchone()
+        if row:
+            conn.execute(
+                "UPDATE users SET username = ?, first_name = ? WHERE telegram_id = ?",
+                (username, first_name, telegram_id),
+            )
+            conn.commit()
+            return row
+
+        conn.execute(
+            """
+            INSERT INTO users (telegram_id, username, first_name, balance, games_played, created_at)
+            VALUES (?, ?, ?, ?, 0, ?)
+            """,
+            (telegram_id, username, first_name, STARTING_BALANCE, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        cur = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+        return cur.fetchone()
+
+
+def update_balance(telegram_id: int, delta: int) -> int:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE users SET balance = balance + ?, games_played = games_played + 1 WHERE telegram_id = ?",
+            (delta, telegram_id),
+        )
+        conn.commit()
+        cur = conn.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,))
+        return cur.fetchone()[0]
+
+
+def get_user(telegram_id: int) -> sqlite3.Row:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+        return cur.fetchone()
+
+
+def find_user(identifier: str):
+    """Ищет пользователя по telegram_id, внутреннему ID или @username."""
+    identifier = identifier.strip().lstrip("@")
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        if identifier.isdigit():
+            num = int(identifier)
+            row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (num,)).fetchone()
+            if row:
+                return row
+            row = conn.execute("SELECT * FROM users WHERE internal_id = ?", (num,)).fetchone()
+            if row:
+                return row
+        row = conn.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (identifier,)
+        ).fetchone()
+        return row
+
+
+def list_all_users(limit: int = 20, offset: int = 0):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM users ORDER BY internal_id ASC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        return rows, total
+
+
+def set_ban(telegram_id: int, banned: bool, reason: str = None) -> None:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE users SET banned = ?, ban_reason = ? WHERE telegram_id = ?",
+            (1 if banned else 0, reason if banned else None, telegram_id),
+        )
+        conn.commit()
+
+
+def add_warning(telegram_id: int) -> int:
+    """Увеличивает счётчик предупреждений и возвращает новое значение."""
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE users SET warnings = warnings + 1 WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        conn.commit()
+        cur = conn.execute("SELECT warnings FROM users WHERE telegram_id = ?", (telegram_id,))
+        return cur.fetchone()[0]
+
+
+def is_user_banned(telegram_id: int) -> bool:
+    user = get_user(telegram_id)
+    return bool(user and user["banned"])
+
+
+# Автобан после этого числа предупреждений (0 — отключить автобан)
+AUTO_BAN_AFTER_WARNINGS = 3
+
+
+# ---------------------------------------------------------------------------
+# Промокоды
+# ---------------------------------------------------------------------------
+
+def create_promo_code(code: str, amount: int, max_uses: int, created_by: int) -> bool:
+    """Создаёт промокод. Возвращает False, если такой код уже существует."""
+    code = code.strip().upper()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        try:
+            conn.execute(
+                """
+                INSERT INTO promo_codes (code, amount, max_uses, used_count, created_by, created_at)
+                VALUES (?, ?, ?, 0, ?, ?)
+                """,
+                (code, amount, max_uses, created_by, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def get_promo_code(code: str):
+    code = code.strip().upper()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM promo_codes WHERE code = ?", (code,))
+        return cur.fetchone()
+
+
+def redeem_promo_code(code: str, telegram_id: int):
+    """
+    Пытается активировать промокод для пользователя.
+    Возвращает (успех: bool, сообщение: str, сумма: int).
+    """
+    code = code.strip().upper()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+
+        promo = conn.execute("SELECT * FROM promo_codes WHERE code = ?", (code,)).fetchone()
+        if not promo:
+            return False, "Такого промокода не существует.", 0
+
+        if promo["used_count"] >= promo["max_uses"]:
+            return False, "У этого промокода закончились активации.", 0
+
+        already = conn.execute(
+            "SELECT 1 FROM promo_redemptions WHERE code = ? AND telegram_id = ?",
+            (code, telegram_id),
+        ).fetchone()
+        if already:
+            return False, "Ты уже активировал этот промокод раньше.", 0
+
+        # Атомарно фиксируем активацию и начисляем баланс
+        conn.execute(
+            "INSERT INTO promo_redemptions (code, telegram_id, redeemed_at) VALUES (?, ?, ?)",
+            (code, telegram_id, datetime.utcnow().isoformat()),
+        )
+        conn.execute(
+            "UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?",
+            (code,),
+        )
+        conn.execute(
+            "UPDATE users SET balance = balance + ? WHERE telegram_id = ?",
+            (promo["amount"], telegram_id),
+        )
+        conn.commit()
+        return True, "Промокод активирован!", promo["amount"]
+
+
+# ---------------------------------------------------------------------------
+# Общие утилиты для игр
+# ---------------------------------------------------------------------------
+
+def parse_bet(context: ContextTypes.DEFAULT_TYPE) -> int:
+    if context.args:
+        try:
+            return int(context.args[0])
+        except ValueError:
+            return DEFAULT_BET
+    return DEFAULT_BET
+
+
+async def check_bet(update: Update, user: sqlite3.Row, bet: int) -> bool:
+    if bet <= 0:
+        await update.message.reply_text("Ставка должна быть положительным числом.")
+        return False
+    if user["balance"] < bet:
+        await update.message.reply_text(
+            f"Недостаточно очков для ставки {bet}. Твой баланс: {user['balance']}."
+        )
+        return False
+    return True
+
+
+async def check_not_banned(update: Update, telegram_id: int) -> bool:
+    """Возвращает True, если можно продолжать. Если пользователь забанен —
+    сообщает причину и возвращает False."""
+    if is_user_banned(telegram_id):
+        user = get_user(telegram_id)
+        reason = user["ban_reason"] or "без указания причины"
+        await update.message.reply_text(
+            f"⛔ Ты заблокирован в этом боте.\nПричина: {reason}"
+        )
+        return False
+    return True
+
+
+def settle(telegram_id: int, bet: int, winnings: int):
+    delta = winnings - bet
+    new_balance = update_balance(telegram_id, delta)
+    if winnings > 0:
+        with closing(sqlite3.connect(DB_PATH)) as conn:
+            conn.execute(
+                "UPDATE users SET best_win = ? WHERE telegram_id = ? AND best_win < ?",
+                (winnings, telegram_id, winnings),
+            )
+            conn.commit()
+    return new_balance, delta
+
+
+# ---------------------------------------------------------------------------
+# /start — создание профиля + анимация загрузки
+# ---------------------------------------------------------------------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+
+    frames = [
+        "⏳ Загрузка········ 10%",
+        "⏳ Загрузка▓········ 25%",
+        "⏳ Загрузка▓▓▓······· 45%",
+        "⏳ Загрузка▓▓▓▓▓····· 65%",
+        "⏳ Загрузка▓▓▓▓▓▓▓··· 85%",
+        "✅ Загрузка▓▓▓▓▓▓▓▓▓▓ 100%",
+    ]
+    msg = await update.message.reply_text(frames[0])
+    for frame in frames[1:]:
+        await asyncio.sleep(0.35)
+        await safe_edit(msg, frame)
+
+    await asyncio.sleep(0.3)
+    await safe_edit(
+        msg,
+        f"Добро пожаловать, {tg_user.first_name}!\n\n"
+        f"🆔 Твой ID в системе: <b>{user['internal_id']}</b>\n"
+        f"💰 Баланс: <b>{user['balance']}</b> очков\n\n"
+        "Набери /games, чтобы увидеть все игры, или /help для списка команд.",
+        parse_mode="HTML",
+    )
+    await update.message.reply_text("Меню игр:", reply_markup=games_keyboard())
+
+
+def games_keyboard() -> InlineKeyboardMarkup:
+    keyboard = []
+
+    if WEBAPP_URL:
+        keyboard.append([
+            InlineKeyboardButton("📱 Открыть мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))
+        ])
+
+    keyboard += [
+        [InlineKeyboardButton("👤 Профиль", callback_data="profile")],
+        [
+            InlineKeyboardButton("🎰 Рулетка", callback_data="how_roulette"),
+            InlineKeyboardButton("🎲 Кости", callback_data="how_dice"),
+        ],
+        [
+            InlineKeyboardButton("🎯 Слоты", callback_data="how_slots"),
+            InlineKeyboardButton("🪙 Монетка", callback_data="how_coinflip"),
+        ],
+        [
+            InlineKeyboardButton("🔴⚫ Чёрное/красное", callback_data="how_blackred"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "🎮 <b>Игры казино</b>\n\nВыбери игру:",
+        parse_mode="HTML",
+        reply_markup=games_keyboard(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# /profile
+# ---------------------------------------------------------------------------
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+
+    text = (
+        f"👤 <b>Профиль</b>\n\n"
+        f"🆔 ID: <b>{user['internal_id']}</b>\n"
+        f"Имя: {user['first_name']}\n"
+        f"💰 Баланс: <b>{user['balance']}</b> очков\n"
+        f"🎮 Игр сыграно: {user['games_played']}\n"
+        f"📅 Регистрация: {user['created_at'][:10]}"
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text, parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# /help
+# ---------------------------------------------------------------------------
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    text = (
+        "Доступные команды:\n"
+        "/start — создать профиль / открыть меню\n"
+        "/profile — посмотреть свой профиль\n"
+        "/games — меню всех игр\n"
+        "/app — открыть мини-приложение (веб-интерфейс)\n\n"
+        f"🎰 /roulette [ставка] — рулетка (по умолч. {DEFAULT_BET})\n"
+        f"🎲 /dice [ставка] [1-6] — родная Telegram-анимация кубика, выигрыш x{DICE_WIN_MULTIPLIER}\n"
+        f"🎯 /slots [ставка] — три барабана, совпадения дают выигрыш\n"
+        f"🪙 /coinflip [ставка] [орёл|решка] — выигрыш x{COINFLIP_WIN_MULTIPLIER}\n"
+        f"🔴⚫ /blackred [ставка] [красное|чёрное] — выигрыш x{BLACKRED_WIN_MULTIPLIER}\n\n"
+        "🎟️ /promo КОД — активировать промокод\n\n"
+        "ℹ️ Валюта в боте виртуальная, не имеет денежной ценности.\n"
+        "В каждой игре есть реальный шанс проиграть ставку."
+    )
+    if tg_user.id in ADMIN_IDS:
+        text += (
+            "\n\n🛡️ <b>Админ-команды:</b>\n"
+            "/users [страница] — список всех пользователей\n"
+            "/userinfo ID_или_@username — подробная информация\n"
+            "/ban ID_или_@username [причина] — заблокировать\n"
+            "/unban ID_или_@username — снять блокировку\n"
+            "/warn ID_или_@username [причина] — выдать предупреждение\n"
+            "/createpromo КОД СУММА [макс_активаций] — создать промокод"
+        )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# 🎰 Рулетка (символьная, с анимацией через редактирование сообщения)
+# ---------------------------------------------------------------------------
+
+def spin_roulette():
+    weights = [s[2] for s in ROULETTE_SECTORS]
+    return random.choices(ROULETTE_SECTORS, weights=weights, k=1)[0]
+
+
+async def roulette(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+    bet = parse_bet(context)
+    if not await check_bet(update, user, bet):
+        return
+
+    result_name, multiplier, _ = spin_roulette()
+    reel_symbols = [s[0].split()[0] for s in ROULETTE_SECTORS]
+    msg = await update.message.reply_text(f"🎰 Ставка: {bet}\n\n[ 🎲 крутим... ]")
+
+    spins = 12
+    for i in range(spins):
+        delay = 0.08 + (i / spins) * 0.25
+        current = random.choice(reel_symbols)
+        await asyncio.sleep(delay)
+        await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {current} {current} {current} ]")
+
+    win_symbol = result_name.split()[0]
+    await asyncio.sleep(0.4)
+    await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {win_symbol} {win_symbol} {win_symbol} ]")
+
+    winnings = int(bet * multiplier)
+    new_balance, delta = settle(tg_user.id, bet, winnings)
+
+    if multiplier == 0:
+        outcome_text = f"😔 <b>{result_name}</b>\nТы проиграл {bet} очков."
+    else:
+        outcome_text = (
+            f"🎉 <b>{result_name}</b>\n"
+            f"Выигрыш: +{winnings} очков (ставка ×{multiplier})\n"
+            f"Чистая прибыль: {'+' if delta >= 0 else ''}{delta}"
+        )
+
+    await asyncio.sleep(0.3)
+    await safe_edit(msg, f"{outcome_text}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# 🎲 Кости — РОДНАЯ Telegram-анимация через send_dice
+# ---------------------------------------------------------------------------
+# Telegram сам присылает анимированный кубик (🎲) и сразу знает исход —
+# пользователь видит настоящую анимацию броска, как в обычном чате, а не
+# текстовую имитацию. Значение (1-6) приходит в message.dice.value.
+
+async def dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    bet = DEFAULT_BET
+    guess = None
+    if context.args:
+        try:
+            bet = int(context.args[0])
+        except ValueError:
+            bet = DEFAULT_BET
+        if len(context.args) > 1:
+            try:
+                g = int(context.args[1])
+                if 1 <= g <= 6:
+                    guess = g
+            except ValueError:
+                guess = None
+
+    if not await check_bet(update, user, bet):
+        return
+
+    if guess is None:
+        guess = random.randint(1, 6)
+        await update.message.reply_text(
+            f"Ты не указал число — за тебя загадано: {guess}\n"
+            f"(в следующий раз: /dice {bet} <1-6>)"
+        )
+
+    await update.message.reply_text(f"🎲 Ставка: {bet} | Твоё число: {guess}\nБросаем кубик...")
+
+    # Отправляем настоящий анимированный кубик Telegram
+    dice_msg = await context.bot.send_dice(chat_id=update.effective_chat.id, emoji="🎲")
+    result = dice_msg.dice.value  # 1..6, определяется сервером Telegram
+
+    # Ждём, пока анимация в клиенте пользователя полностью доиграет (~4 сек)
+    await asyncio.sleep(4.0)
+
+    win = result == guess
+    winnings = int(bet * DICE_WIN_MULTIPLIER) if win else 0
+    new_balance, delta = settle(tg_user.id, bet, winnings)
+
+    if win:
+        outcome = f"🎉 Угадал! Выпало {result}.\nВыигрыш: +{winnings} (x{DICE_WIN_MULTIPLIER})"
+    else:
+        outcome = f"😔 Не угадал. Выпало {result}, ты ставил на {guess}.\nПроигрыш: -{bet}"
+
+    await update.message.reply_text(f"{outcome}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# 🎯 Слоты — три барабана (баг с 400 Bad Request исправлен через safe_edit)
+# ---------------------------------------------------------------------------
+
+def spin_slot_reel():
+    symbols = [s[0] for s in SLOT_SYMBOLS]
+    weights = [s[1] for s in SLOT_SYMBOLS]
+    return random.choices(symbols, weights=weights, k=1)[0]
+
+
+async def slots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+    bet = parse_bet(context)
+    if not await check_bet(update, user, bet):
+        return
+
+    msg = await update.message.reply_text(f"🎯 Ставка: {bet}\n\n[ 🎰 | 🎰 | 🎰 ]")
+
+    all_symbols = [s[0] for s in SLOT_SYMBOLS]
+    spins = 14
+    for i in range(spins):
+        delay = 0.06 + (i / spins) * 0.2
+        row = [random.choice(all_symbols) for _ in range(3)]
+        await asyncio.sleep(delay)
+        await safe_edit(msg, f"🎯 Ставка: {bet}\n\n[ {row[0]} | {row[1]} | {row[2]} ]")
+
+    final = [spin_slot_reel() for _ in range(3)]
+    await asyncio.sleep(0.4)
+    await safe_edit(msg, f"🎯 Ставка: {bet}\n\n[ {final[0]} | {final[1]} | {final[2]} ]")
+
+    if final[0] == final[1] == final[2]:
+        mult = SLOT_TRIPLE_MULTIPLIER.get(final[0], 3)
+        winnings = int(bet * mult)
+        outcome = f"👑 ТРИ ОДИНАКОВЫХ {final[0]}!\nВыигрыш: +{winnings} (x{mult})"
+    elif final[0] == final[1] or final[1] == final[2] or final[0] == final[2]:
+        winnings = int(bet * SLOT_PAIR_MULTIPLIER)
+        outcome = f"🙂 Пара совпала.\nВыигрыш: +{winnings} (x{SLOT_PAIR_MULTIPLIER})"
+    else:
+        winnings = 0
+        outcome = f"😔 Ничего не совпало.\nПроигрыш: -{bet}"
+
+    new_balance, delta = settle(tg_user.id, bet, winnings)
+    await asyncio.sleep(0.3)
+    await safe_edit(msg, f"{outcome}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# 🪙 Монетка
+# ---------------------------------------------------------------------------
+
+async def coinflip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    bet = DEFAULT_BET
+    choice = None
+    if context.args:
+        try:
+            bet = int(context.args[0])
+        except ValueError:
+            bet = DEFAULT_BET
+        if len(context.args) > 1:
+            arg = context.args[1].lower()
+            if arg in ("орёл", "орел", "heads", "о"):
+                choice = "орёл"
+            elif arg in ("решка", "tails", "р"):
+                choice = "решка"
+
+    if not await check_bet(update, user, bet):
+        return
+
+    if choice is None:
+        choice = random.choice(["орёл", "решка"])
+        await update.message.reply_text(
+            f"Не указал сторону — за тебя выбрано: {choice}\n"
+            f"(в следующий раз: /coinflip {bet} орёл|решка)"
+        )
+
+    msg = await update.message.reply_text(f"🪙 Ставка: {bet} | Твой выбор: {choice}\n\n[ 🪙 подбрасываем... ]")
+
+    frames = ["🪙", "◐", "🪙", "◐", "🪙"]
+    for f in frames:
+        await asyncio.sleep(0.18)
+        await safe_edit(msg, f"🪙 Ставка: {bet} | Твой выбор: {choice}\n\n[ {f} ]")
+
+    result = random.choice(["орёл", "решка"])
+    win = result == choice
+    winnings = int(bet * COINFLIP_WIN_MULTIPLIER) if win else 0
+    new_balance, delta = settle(tg_user.id, bet, winnings)
+
+    symbol = "🦅" if result == "орёл" else "🔵"
+    await asyncio.sleep(0.3)
+    if win:
+        outcome = f"{symbol} Выпало: {result}!\n🎉 Угадал! Выигрыш: +{winnings} (x{COINFLIP_WIN_MULTIPLIER})"
+    else:
+        outcome = f"{symbol} Выпало: {result}.\n😔 Не угадал. Проигрыш: -{bet}"
+
+    await safe_edit(msg, f"{outcome}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# 🔴⚫ Чёрное/красное — классическая раскладка рулетки (18/18/1 зеро)
+# ---------------------------------------------------------------------------
+
+def spin_blackred():
+    """Возвращает 'red', 'black' или 'green' с весами как в настоящей рулетке."""
+    pool = (
+        ["red"] * BLACKRED_RED_COUNT
+        + ["black"] * BLACKRED_BLACK_COUNT
+        + ["green"] * BLACKRED_GREEN_COUNT
+    )
+    return random.choice(pool)
+
+
+async def blackred(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    bet = DEFAULT_BET
+    choice = None
+    if context.args:
+        try:
+            bet = int(context.args[0])
+        except ValueError:
+            bet = DEFAULT_BET
+        if len(context.args) > 1:
+            arg = context.args[1].lower()
+            if arg in ("красное", "красный", "red", "к"):
+                choice = "red"
+            elif arg in ("чёрное", "черное", "чёрный", "черный", "black", "ч"):
+                choice = "black"
+
+    if not await check_bet(update, user, bet):
+        return
+
+    if choice is None:
+        choice = random.choice(["red", "black"])
+        human = "красное" if choice == "red" else "чёрное"
+        await update.message.reply_text(
+            f"Не указал цвет — за тебя выбрано: {human}\n"
+            f"(в следующий раз: /blackred {bet} красное|чёрное)"
+        )
+
+    choice_label = "🔴 Красное" if choice == "red" else "⚫ Чёрное"
+    msg = await update.message.reply_text(f"{choice_label} | Ставка: {bet}\n\n[ 🎡 крутим... ]")
+
+    colors_cycle = ["🔴", "⚫", "🔴", "⚫", "🟢", "🔴", "⚫"]
+    spins = 14
+    for i in range(spins):
+        delay = 0.07 + (i / spins) * 0.22
+        current = random.choice(colors_cycle)
+        await asyncio.sleep(delay)
+        await safe_edit(msg, f"{choice_label} | Ставка: {bet}\n\n[ {current} ]")
+
+    result = spin_blackred()
+    result_symbol = {"red": "🔴", "black": "⚫", "green": "🟢"}[result]
+    result_label = {"red": "Красное", "black": "Чёрное", "green": "Зеро"}[result]
+
+    await asyncio.sleep(0.4)
+    await safe_edit(msg, f"{choice_label} | Ставка: {bet}\n\n[ {result_symbol} {result_label} ]")
+
+    win = result == choice
+    winnings = int(bet * BLACKRED_WIN_MULTIPLIER) if win else 0
+    new_balance, delta = settle(tg_user.id, bet, winnings)
+
+    if win:
+        outcome = f"🎉 Выпало {result_symbol} {result_label}!\nВыигрыш: +{winnings} (x{BLACKRED_WIN_MULTIPLIER})"
+    elif result == "green":
+        outcome = f"🟢 Выпало зеро — банк забирает казино.\nПроигрыш: -{bet}"
+    else:
+        outcome = f"😔 Выпало {result_symbol} {result_label}, ты ставил на {choice_label.split()[1]}.\nПроигрыш: -{bet}"
+
+    await asyncio.sleep(0.2)
+    await safe_edit(msg, f"{outcome}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# 🌐 HTTP-API для мини-приложения (index.html)
+# ---------------------------------------------------------------------------
+# Мини-приложение больше не считает результаты игр само в браузере — оно
+# спрашивает у этого API, а API использует ТУ ЖЕ базу данных и ТЕ ЖЕ
+# функции (spin_roulette, spin_slot_reel, settle и т.д.), что и команды
+# бота. Поэтому баланс в приложении и в боте — гарантированно одно и то
+# же число, а не два независимых счётчика.
+#
+# Подлинность запроса проверяется через initData, которую Telegram
+# WebApp кладёт в window.Telegram.WebApp.initData — это подписанная
+# HMAC-подписью строка, поддельную сфабриковать нельзя, не зная токен
+# бота. Так что баланс нельзя "накрутить" из консоли браузера.
+
+def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86400):
+    """Проверяет подпись initData, присланной Telegram WebApp.
+    Возвращает словарь полей, если подпись верна и данные не устарели,
+    иначе None. См. https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
+    """
+    if not init_data:
+        return None
+    try:
+        pairs = urllib.parse.parse_qsl(init_data, strict_parsing=True)
+    except ValueError:
+        return None
+    data = dict(pairs)
+    received_hash = data.pop("hash", None)
+    if not received_hash:
+        return None
+
+    check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    computed_hash = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(computed_hash, received_hash):
+        return None
+
+    auth_date = data.get("auth_date")
+    if auth_date:
+        try:
+            if datetime.utcnow().timestamp() - int(auth_date) > max_age_seconds:
+                return None
+        except ValueError:
+            pass
+    return data
+
+
+def _cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    }
+
+
+async def _handle_options(request):
+    return web.Response(headers=_cors_headers())
+
+
+def _auth_telegram_user(body: dict):
+    """Проверяет initData из тела запроса и возвращает объект user Telegram
+    (dict с id/username/first_name), либо None, если подпись неверна."""
+    init_data = body.get("initData") or ""
+    parsed = validate_init_data(init_data, TOKEN)
+    if not parsed:
+        return None
+    user_raw = parsed.get("user")
+    if not user_raw:
+        return None
+    try:
+        return json.loads(user_raw)
+    except (ValueError, TypeError):
+        return None
+
+
+async def api_state(request):
+    """POST /api/state — текущее состояние профиля (баланс, игры, рекорд)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    user = get_or_create_user(tg_user["id"], tg_user.get("username") or "", tg_user.get("first_name") or "")
+    if user["banned"]:
+        return web.json_response(
+            {"error": "banned", "reason": user["ban_reason"] or "без указания причины"},
+            status=403,
+            headers=_cors_headers(),
+        )
+
+    return web.json_response(
+        {
+            "internal_id": user["internal_id"],
+            "name": tg_user.get("first_name") or user["first_name"] or "Игрок",
+            "balance": user["balance"],
+            "games_played": user["games_played"],
+            "best_win": user["best_win"],
+        },
+        headers=_cors_headers(),
+    )
+
+
+async def api_play(request):
+    """POST /api/play — сыграть раунд одной из игр. Тело запроса:
+    { initData, game: "roulette"|"dice"|"slots"|"coinflip"|"blackred",
+      bet: число, guess?: 1-6, choice?: "орёл"|"решка"|"red"|"black" }
+    Вся логика — те же функции, что использует бот (spin_roulette и т.д.),
+    так что шансы совпадают 1-в-1 с командами /roulette, /dice и т.д."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    telegram_id = tg_user["id"]
+    user = get_or_create_user(telegram_id, tg_user.get("username") or "", tg_user.get("first_name") or "")
+    if user["banned"]:
+        return web.json_response(
+            {"error": "banned", "reason": user["ban_reason"] or "без указания причины"},
+            status=403,
+            headers=_cors_headers(),
+        )
+
+    game = body.get("game")
+    try:
+        bet = int(body.get("bet"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "invalid_bet"}, status=400, headers=_cors_headers())
+
+    if bet <= 0:
+        return web.json_response({"error": "invalid_bet"}, status=400, headers=_cors_headers())
+    if bet > user["balance"]:
+        return web.json_response({"error": "insufficient_balance"}, status=400, headers=_cors_headers())
+
+    if game == "roulette":
+        result_name, multiplier, _ = spin_roulette()
+        winnings = int(bet * multiplier)
+        payload = {"resultName": result_name, "multiplier": multiplier}
+
+    elif game == "dice":
+        try:
+            guess = int(body.get("guess"))
+            if not (1 <= guess <= 6):
+                raise ValueError
+        except (TypeError, ValueError):
+            guess = random.randint(1, 6)
+        roll = random.randint(1, 6)
+        win = roll == guess
+        winnings = int(bet * DICE_WIN_MULTIPLIER) if win else 0
+        payload = {"roll": roll, "guess": guess, "win": win}
+
+    elif game == "slots":
+        final = [spin_slot_reel() for _ in range(3)]
+        if final[0] == final[1] == final[2]:
+            mult = SLOT_TRIPLE_MULTIPLIER.get(final[0], 3)
+            winnings = int(bet * mult)
+        elif final[0] == final[1] or final[1] == final[2] or final[0] == final[2]:
+            winnings = int(bet * SLOT_PAIR_MULTIPLIER)
+        else:
+            winnings = 0
+        payload = {"reels": final}
+
+    elif game == "coinflip":
+        choice = body.get("choice")
+        if choice not in ("орёл", "решка"):
+            choice = random.choice(["орёл", "решка"])
+        result = random.choice(["орёл", "решка"])
+        win = result == choice
+        winnings = int(bet * COINFLIP_WIN_MULTIPLIER) if win else 0
+        payload = {"result": result, "choice": choice, "win": win}
+
+    elif game == "blackred":
+        choice = body.get("choice")
+        if choice not in ("red", "black"):
+            choice = random.choice(["red", "black"])
+        result = spin_blackred()
+        win = result == choice
+        winnings = int(bet * BLACKRED_WIN_MULTIPLIER) if win else 0
+        payload = {"result": result, "choice": choice, "win": win}
+
+    else:
+        return web.json_response({"error": "unknown_game"}, status=400, headers=_cors_headers())
+
+    new_balance, delta = settle(telegram_id, bet, winnings)
+    updated = get_user(telegram_id)
+    payload.update(
+        {
+            "bet": bet,
+            "winnings": winnings,
+            "delta": delta,
+            "balance": new_balance,
+            "games_played": updated["games_played"],
+            "best_win": updated["best_win"],
+        }
+    )
+    return web.json_response(payload, headers=_cors_headers())
+
+
+def build_api_app() -> web.Application:
+    app = web.Application()
+    app.router.add_post("/api/state", api_state)
+    app.router.add_post("/api/play", api_play)
+    app.router.add_route("OPTIONS", "/api/state", _handle_options)
+    app.router.add_route("OPTIONS", "/api/play", _handle_options)
+    return app
+
+
+def run_api_server() -> None:
+    """Запускает aiohttp-сервер в собственном event loop'е отдельного
+    потока, параллельно с polling-циклом бота в главном потоке."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    app = build_api_app()
+    logger.info("API мини-приложения слушает на 0.0.0.0:%s", API_PORT)
+    web.run_app(app, host="0.0.0.0", port=API_PORT, print=None)
+
+
+# ---------------------------------------------------------------------------
+# 🛡️ Админ-панель: список пользователей, баны, предупреждения
+# ---------------------------------------------------------------------------
+
+USERS_PAGE_SIZE = 15
+
+
+def format_user_line(u: sqlite3.Row) -> str:
+    status = "⛔" if u["banned"] else "✅"
+    warn = f" ⚠️{u['warnings']}" if u["warnings"] else ""
+    uname = f"@{u['username']}" if u["username"] else "—"
+    return (
+        f"{status} #{u['internal_id']} | {u['first_name']} ({uname})\n"
+        f"    id:{u['telegram_id']} | 💰{u['balance']} | 🎮{u['games_played']}{warn}"
+    )
+
+
+async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ-команда: /users [страница]"""
+    tg_user = update.effective_user
+    if tg_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+
+    page = 1
+    if context.args:
+        try:
+            page = max(1, int(context.args[0]))
+        except ValueError:
+            page = 1
+
+    offset = (page - 1) * USERS_PAGE_SIZE
+    rows, total = list_all_users(limit=USERS_PAGE_SIZE, offset=offset)
+
+    if not rows:
+        await update.message.reply_text("Пользователей на этой странице нет.")
+        return
+
+    total_pages = (total + USERS_PAGE_SIZE - 1) // USERS_PAGE_SIZE
+    lines = [format_user_line(u) for u in rows]
+    text = (
+        f"👥 <b>Пользователи</b> (стр. {page}/{total_pages}, всего {total})\n\n"
+        + "\n\n".join(lines)
+        + f"\n\nЕщё страницы: /users {page + 1}"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def user_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ-команда: /userinfo ID_или_@username"""
+    tg_user = update.effective_user
+    if tg_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /userinfo ID_или_@username")
+        return
+
+    u = find_user(context.args[0])
+    if not u:
+        await update.message.reply_text("Пользователь не найден.")
+        return
+
+    status = "⛔ Забанен" if u["banned"] else "✅ Активен"
+    text = (
+        f"👤 <b>{u['first_name']}</b> (@{u['username'] or '—'})\n\n"
+        f"🆔 Внутренний ID: {u['internal_id']}\n"
+        f"📱 Telegram ID: <code>{u['telegram_id']}</code>\n"
+        f"💰 Баланс: {u['balance']}\n"
+        f"🎮 Игр сыграно: {u['games_played']}\n"
+        f"⚠️ Предупреждений: {u['warnings']}\n"
+        f"Статус: {status}"
+    )
+    if u["banned"] and u["ban_reason"]:
+        text += f"\nПричина бана: {u['ban_reason']}"
+
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def ban_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ-команда: /ban ID_или_@username [причина]"""
+    tg_user = update.effective_user
+    if tg_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /ban ID_или_@username [причина]")
+        return
+
+    u = find_user(context.args[0])
+    if not u:
+        await update.message.reply_text("Пользователь не найден.")
+        return
+
+    reason = " ".join(context.args[1:]) if len(context.args) > 1 else "не указана"
+    set_ban(u["telegram_id"], True, reason)
+
+    await update.message.reply_text(
+        f"⛔ Пользователь {u['first_name']} (id:{u['telegram_id']}) забанен.\nПричина: {reason}"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=u["telegram_id"],
+            text=f"⛔ Ты заблокирован в этом боте.\nПричина: {reason}",
+        )
+    except Exception:
+        pass  # пользователь мог заблокировать бота — это не критично
+
+
+async def unban_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ-команда: /unban ID_или_@username"""
+    tg_user = update.effective_user
+    if tg_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /unban ID_или_@username")
+        return
+
+    u = find_user(context.args[0])
+    if not u:
+        await update.message.reply_text("Пользователь не найден.")
+        return
+
+    set_ban(u["telegram_id"], False)
+    await update.message.reply_text(f"✅ Пользователь {u['first_name']} (id:{u['telegram_id']}) разбанен.")
+    try:
+        await context.bot.send_message(
+            chat_id=u["telegram_id"],
+            text="✅ Блокировка снята, можешь снова пользоваться ботом.",
+        )
+    except Exception:
+        pass
+
+
+async def warn_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ-команда: /warn ID_или_@username [причина]"""
+    tg_user = update.effective_user
+    if tg_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /warn ID_или_@username [причина]")
+        return
+
+    u = find_user(context.args[0])
+    if not u:
+        await update.message.reply_text("Пользователь не найден.")
+        return
+
+    reason = " ".join(context.args[1:]) if len(context.args) > 1 else "не указана"
+    new_count = add_warning(u["telegram_id"])
+
+    await update.message.reply_text(
+        f"⚠️ Пользователю {u['first_name']} (id:{u['telegram_id']}) выдано предупреждение "
+        f"({new_count} всего).\nПричина: {reason}"
+    )
+
+    warning_text = f"⚠️ Тебе выдано предупреждение.\nПричина: {reason}\nВсего предупреждений: {new_count}"
+
+    auto_banned = False
+    if AUTO_BAN_AFTER_WARNINGS and new_count >= AUTO_BAN_AFTER_WARNINGS:
+        auto_reason = f"автобан после {new_count} предупреждений"
+        set_ban(u["telegram_id"], True, auto_reason)
+        warning_text += f"\n\n⛔ Достигнут лимит предупреждений — доступ заблокирован."
+        auto_banned = True
+
+    try:
+        await context.bot.send_message(chat_id=u["telegram_id"], text=warning_text)
+    except Exception:
+        pass
+
+    if auto_banned:
+        await update.message.reply_text(
+            f"⛔ Пользователь автоматически забанен (лимит {AUTO_BAN_AFTER_WARNINGS} предупреждений)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 🎟️ Промокоды
+# ---------------------------------------------------------------------------
+
+async def create_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ-команда: /createpromo КОД СУММА [макс_активаций]"""
+    tg_user = update.effective_user
+
+    if tg_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/createpromo КОД СУММА [макс_активаций]\n\n"
+            "Примеры:\n"
+            "/createpromo WELCOME100 100 — код на 100 очков, 1 активация на человека\n"
+            "/createpromo VIP500 500 50 — код на 500 очков, максимум 50 активаций всего"
+        )
+        return
+
+    code = context.args[0]
+    try:
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Сумма должна быть целым числом.")
+        return
+
+    if amount <= 0:
+        await update.message.reply_text("Сумма должна быть положительной.")
+        return
+
+    max_uses = 1
+    if len(context.args) >= 3:
+        try:
+            max_uses = int(context.args[2])
+            if max_uses <= 0:
+                max_uses = 1
+        except ValueError:
+            max_uses = 1
+
+    created = create_promo_code(code, amount, max_uses, tg_user.id)
+    if not created:
+        await update.message.reply_text(
+            f"Промокод «{code.upper()}» уже существует. Выбери другой код."
+        )
+        return
+
+    await update.message.reply_text(
+        f"✅ Промокод создан!\n\n"
+        f"🎟️ Код: <code>{code.upper()}</code>\n"
+        f"💰 Сумма: {amount} очков\n"
+        f"🔢 Макс. активаций: {max_uses}\n\n"
+        f"Отправь пользователям команду:\n<code>/promo {code.upper()}</code>",
+        parse_mode="HTML",
+    )
+
+
+async def promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Пользовательская команда: /promo КОД"""
+    tg_user = update.effective_user
+    get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /promo КОД")
+        return
+
+    code = context.args[0]
+    success, message, amount = redeem_promo_code(code, tg_user.id)
+
+    if success:
+        new_balance = get_user(tg_user.id)["balance"]
+        await update.message.reply_text(
+            f"🎉 {message}\n"
+            f"💰 Начислено: +{amount} очков\n"
+            f"Новый баланс: <b>{new_balance}</b>",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(f"❌ {message}")
+
+
+async def open_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/app — прямая кнопка для открытия мини-приложения."""
+    if not WEBAPP_URL:
+        await update.message.reply_text(
+            "Мини-приложение пока не подключено.\n"
+            "Администратору: задай WEBAPP_URL в bot.py (см. инструкцию в конце файла)."
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📱 Открыть", web_app=WebAppInfo(url=WEBAPP_URL))]]
+    )
+    await update.message.reply_text("Жми, чтобы открыть мини-приложение:", reply_markup=keyboard)
+
+
+# ---------------------------------------------------------------------------
+# Обработчик инлайн-кнопок
+# ---------------------------------------------------------------------------
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "profile":
+        await profile(update, context)
+    elif query.data == "how_roulette":
+        await query.message.reply_text(f"🎰 /roulette {DEFAULT_BET} — крути рулетку на указанную ставку.")
+    elif query.data == "how_dice":
+        await query.message.reply_text(f"🎲 /dice {DEFAULT_BET} 4 — ставка {DEFAULT_BET}, загадываешь число 4 (1–6).")
+    elif query.data == "how_slots":
+        await query.message.reply_text(f"🎯 /slots {DEFAULT_BET} — крути слоты на указанную ставку.")
+    elif query.data == "how_coinflip":
+        await query.message.reply_text(f"🪙 /coinflip {DEFAULT_BET} орёл — ставка {DEFAULT_BET} на орла.")
+    elif query.data == "how_blackred":
+        await query.message.reply_text(f"🔴⚫ /blackred {DEFAULT_BET} красное — ставка {DEFAULT_BET} на красное.")
+
+
+# ---------------------------------------------------------------------------
+# Обработчик ошибок
+# ---------------------------------------------------------------------------
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Ошибка при обработке обновления %s: %s", update, context.error)
+
+
+# ---------------------------------------------------------------------------
+# Точка входа
+# ---------------------------------------------------------------------------
+
+async def post_init(application) -> None:
+    """Выполняется один раз при старте: ставит системную Menu Button
+    (кнопка рядом со скрепкой ввода), открывающую мини-приложение."""
+    if not WEBAPP_URL:
+        return
+    try:
+        from telegram import MenuButtonWebApp
+        await application.bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="🎰 Казино", web_app=WebAppInfo(url=WEBAPP_URL))
+        )
+        logger.info("Menu Button с мини-приложением установлена.")
+    except Exception as e:
+        logger.warning("Не удалось установить Menu Button: %s", e)
+
+
+def main() -> None:
+    if TOKEN == "ВАШ_ТОКЕН_ЗДЕСЬ":
+        raise SystemExit(
+            "Укажи токен бота через переменную окружения BOT_TOKEN.\n"
+            "PowerShell: $env:BOT_TOKEN=\"123456:ABC-DEF...\"\n"
+            "Linux/macOS: export BOT_TOKEN=\"123456:ABC-DEF...\""
+        )
+
+    init_db()
+
+    api_thread = threading.Thread(target=run_api_server, daemon=True)
+    api_thread.start()
+
+    builder = ApplicationBuilder().token(TOKEN).post_init(post_init)
+    if PROXY_URL:
+        builder = builder.proxy(PROXY_URL).get_updates_proxy(PROXY_URL)
+        logger.info("Использую прокси: %s", PROXY_URL)
+    application = builder.build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("profile", profile))
+    application.add_handler(CommandHandler("games", games_menu))
+    application.add_handler(CommandHandler("app", open_app))
+    application.add_handler(CommandHandler("roulette", roulette))
+    application.add_handler(CommandHandler("dice", dice))
+    application.add_handler(CommandHandler("slots", slots))
+    application.add_handler(CommandHandler("coinflip", coinflip))
+    application.add_handler(CommandHandler("blackred", blackred))
+    application.add_handler(CommandHandler("createpromo", create_promo))
+    application.add_handler(CommandHandler("promo", promo))
+    application.add_handler(CommandHandler("users", list_users))
+    application.add_handler(CommandHandler("userinfo", user_info))
+    application.add_handler(CommandHandler("ban", ban_user_cmd))
+    application.add_handler(CommandHandler("unban", unban_user_cmd))
+    application.add_handler(CommandHandler("warn", warn_user_cmd))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    application.add_error_handler(error_handler)
+
+    logger.info("Бот запущен. Нажми Ctrl+C для остановки.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
