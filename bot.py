@@ -30,6 +30,17 @@ index.html обращается туда за балансом и результ
 баланс в приложении и в боте всегда одно и то же число из одной базы.
 Этот API нужно опубликовать по HTTPS-адресу (Render/Railway/свой сервер
 с nginx) и указать этот адрес в константе API_BASE_URL внутри index.html.
+
+Установка зависимостей:
+    pip install -r requirements.txt
+
+Запуск (Windows / PowerShell):
+    $env:BOT_TOKEN="твой_токен_от_BotFather"
+    python bot.py
+
+Запуск (Linux / macOS):
+    export BOT_TOKEN="твой_токен_от_BotFather"
+    python bot.py
 """
 
 import asyncio
@@ -72,7 +83,7 @@ PROXY_URL = os.getenv("BOT_PROXY_URL") or None
 # Как получить бесплатный HTTPS-адрес — см. инструкцию в конце этого файла.
 # Пока не задан — кнопки мини-приложения просто не показываются, бот работает
 # как раньше через обычные команды.
-WEBAPP_URL = os.getenv("https://symrak122-dotcom.github.io/roulette-club/") or None
+WEBAPP_URL = os.getenv("BOT_WEBAPP_URL") or None
 # Например: WEBAPP_URL = "https://твой-юзернейм.github.io/roulette-club/"
 
 # Порт, на котором бот поднимает свой HTTP-API для мини-приложения.
@@ -86,14 +97,14 @@ WEBAPP_URL = os.getenv("https://symrak122-dotcom.github.io/roulette-club/") or N
 # PORT и требуют, чтобы сервис слушал именно её — иначе деплой считается
 # неудачным. Поэтому PORT имеет приоритет, а API_PORT — запасной вариант
 # для хостингов, где порт не навязывается.
-API_PORT = int(os.getenv("PORT") or os.getenv("https://respectful-charisma-production-0bf7.up.railway.app", "8080"))
+API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 
 # ID администраторов, которым разрешено создавать промокоды.
 # Узнать свой Telegram ID можно у бота @userinfobot — впиши число сюда.
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -1071,11 +1082,18 @@ def build_api_app() -> web.Application:
 def run_api_server() -> None:
     """Запускает aiohttp-сервер в собственном event loop'е отдельного
     потока, параллельно с polling-циклом бота в главном потоке."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    app = build_api_app()
-    logger.info("API мини-приложения слушает на 0.0.0.0:%s", API_PORT)
-    web.run_app(app, host="0.0.0.0", port=API_PORT, print=None)
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        app = build_api_app()
+        logger.info("API мини-приложения слушает на 0.0.0.0:%s", API_PORT)
+        # handle_signals=False обязателен: aiohttp по умолчанию пытается
+        # перехватить системные сигналы (Ctrl+C и т.п.), а это разрешено
+        # только в главном потоке программы. Без этого флага сервер падал
+        # сразу после старта, никак не логируя ошибку, и Railway отвечал 502.
+        web.run_app(app, host="0.0.0.0", port=API_PORT, print=None, handle_signals=False)
+    except Exception:
+        logger.exception("API мини-приложения аварийно остановилось")
 
 
 # ---------------------------------------------------------------------------
