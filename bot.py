@@ -120,7 +120,7 @@ SLOT_TRIPLE_MULTIPLIER = {
 SLOT_PAIR_MULTIPLIER = 1.0
 
 # --- Монетка: 50/50 ---
-COINFLIP_WIN_MULTIPLIER = 2
+COINFLIP_WIN_MULTIPLIER = 2.0
 
 # --- Чёрное/красное: классическая рулеточная раскладка (европейская, зеро одно) ---
 # 18 красных + 18 чёрных + 1 зелёное зеро = 37 секторов.
