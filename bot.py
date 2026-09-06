@@ -120,7 +120,7 @@ SLOT_TRIPLE_MULTIPLIER = {
 SLOT_PAIR_MULTIPLIER = 1.2
 
 # --- Монетка: 50/50 ---
-COINFLIP_WIN_MULTIPLIER = 1.9
+COINFLIP_WIN_MULTIPLIER = 2
 
 # --- Чёрное/красное: классическая рулеточная раскладка (европейская, зеро одно) ---
 # 18 красных + 18 чёрных + 1 зелёное зеро = 37 секторов.
@@ -442,8 +442,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     frames = [
         "⏳ Загрузка········ 10%",
+        "⏳ Загрузка········ 13%",
         "⏳ Загрузка▓········ 25%",
         "⏳ Загрузка▓▓▓······· 45%",
+        "⏳ Загрузка▓▓▓▓▓····· 65%",
         "⏳ Загрузка▓▓▓▓▓····· 65%",
         "⏳ Загрузка▓▓▓▓▓▓▓··· 85%",
         "✅ Загрузка▓▓▓▓▓▓▓▓▓▓ 100%",
@@ -545,7 +547,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     if tg_user.id in ADMIN_IDS:
         text += (
-            "\n\n🛡️ <b>Админ-команды:</b>\n"
+            "\n\n🛡️ <b>Админ-командыдля rifoliv:</b>\n"
             "/users [страница] — список всех пользователей\n"
             "/userinfo ID_или_@username — подробная информация\n"
             "/ban ID_или_@username [причина] — заблокировать\n"
