@@ -394,6 +394,16 @@
     </div>
   </div>
 
+  <div class="balance-card" style="text-align:left;">
+    <div class="balance-label" style="margin-bottom:10px;">🎟️ Промокод</div>
+    <div class="bet-row" style="margin-bottom:8px;">
+      <input id="promoInput" type="text" placeholder="Введите код" autocapitalize="characters"
+        style="flex:1 1 auto; min-width:0; padding:10px 12px; border-radius:10px; background:var(--bg-2); border:1px solid transparent; color:var(--text-0); font-size:14px; outline:none;">
+      <div class="chip" id="promoBtn" style="flex:0 0 auto; min-width:96px;">Активировать</div>
+    </div>
+    <div class="result-msg" id="promoMsg" style="margin-top:4px;"></div>
+  </div>
+
   <div class="tabs" id="tabs"></div>
 
   <div class="section-title" id="gameTitle">Рулетка</div>
@@ -429,28 +439,28 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://respectful-charisma-production-0bf7.up.railway.app"; // <-- замените после деплоя backend
-  var API_CONFIGURED = API_BASE_URL.indexOf("https://respectful-charisma-production-0bf7.up.railway.app") === -1;
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
+  var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
   var STARTING_BALANCE = 100;
 
   // ---- Описание игр: множители синхронизированы с bot.py ----
   var ROULETTE_SECTORS = [
-    { symbol: "💥", label: "Мимо",        mult: 0,    weight: 40 },
-    { symbol: "🍒", label: "x1.5",         mult: 1.5,  weight: 25 },
-    { symbol: "🍋", label: "x2",           mult: 2,    weight: 15 },
-    { symbol: "⭐", label: "x3",           mult: 3,    weight: 10 },
-    { symbol: "💎", label: "x5",           mult: 5,    weight: 6 },
-    { symbol: "👑", label: "JACKPOT x10",  mult: 10,   weight: 4 }
+    { symbol: "💥", label: "Мимо",        mult: 0,    weight: 55 },
+    { symbol: "🍒", label: "x1.5",         mult: 1.5,  weight: 20 },
+    { symbol: "🍋", label: "x2",           mult: 2,    weight: 12 },
+    { symbol: "⭐", label: "x3",           mult: 3,    weight: 7 },
+    { symbol: "💎", label: "x5",           mult: 5,    weight: 4 },
+    { symbol: "👑", label: "JACKPOT x10",  mult: 10,   weight: 2 }
   ];
   var SLOT_SYMBOLS = [
-    { symbol: "🍋", weight: 30 },
-    { symbol: "🍒", weight: 25 },
+    { symbol: "🍋", weight: 24 },
+    { symbol: "🍒", weight: 22 },
     { symbol: "🔔", weight: 20 },
-    { symbol: "⭐", weight: 15 },
-    { symbol: "💎", weight: 8 },
-    { symbol: "7️⃣", weight: 2 }
+    { symbol: "⭐", weight: 16 },
+    { symbol: "💎", weight: 12 },
+    { symbol: "7️⃣", weight: 6 }
   ];
   var SLOT_TRIPLE_MULT = { "🍋":3, "🍒":4, "🔔":6, "⭐":10, "💎":20, "7️⃣":50 };
   var SLOT_PAIR_MULT = 1.2;
@@ -758,6 +768,25 @@
     return list[list.length-1];
   }
 
+  // Возвращает 3 символа для барабана рулетки: один из них — реальный
+  // результат (winSymbol), два других — случайные, но разные между собой
+  // символы из того же набора (например 💎 🍒 💥 вместо трёх одинаковых).
+  function threeReelSymbols(winSymbol){
+    var pool = ROULETTE_SECTORS.map(function(s){ return s.symbol; });
+    var others = pool.filter(function(s){ return s !== winSymbol; });
+    for (var i = others.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var tmp = others[i]; others[i] = others[j]; others[j] = tmp;
+    }
+    var picks = [winSymbol].concat(others.slice(0, 2));
+    while (picks.length < 3) picks.push(winSymbol);
+    for (var k = picks.length - 1; k > 0; k--) {
+      var m = Math.floor(Math.random() * (k + 1));
+      var t2 = picks[k]; picks[k] = picks[m]; picks[m] = t2;
+    }
+    return picks;
+  }
+
   function localPlay(game, bet){
     if (game === "roulette") {
       var sector = weightedPick(ROULETTE_SECTORS);
@@ -836,8 +865,12 @@
     var i = 0;
     function tick(){
       if (game === "roulette") {
-        var s = ROULETTE_SECTORS[Math.floor(Math.random()*ROULETTE_SECTORS.length)].symbol;
-        setReelCells(s, true, false);
+        var rSyms = [
+          ROULETTE_SECTORS[Math.floor(Math.random()*ROULETTE_SECTORS.length)].symbol,
+          ROULETTE_SECTORS[Math.floor(Math.random()*ROULETTE_SECTORS.length)].symbol,
+          ROULETTE_SECTORS[Math.floor(Math.random()*ROULETTE_SECTORS.length)].symbol
+        ];
+        setReelCellsEach(rSyms, false);
       } else if (game === "slots") {
         var syms = [
           SLOT_SYMBOLS[Math.floor(Math.random()*SLOT_SYMBOLS.length)].symbol,
@@ -890,7 +923,9 @@
     var win = data.winnings > 0;
     if (game === "roulette") {
       var sector = ROULETTE_SECTORS.filter(function(s){ return s.label === data.resultName; })[0];
-      setReelCells(sector ? sector.symbol : "❔", false, win);
+      var winSym = sector ? sector.symbol : "❔";
+      var reels = (data.reels && data.reels.length === 3) ? data.reels : threeReelSymbols(winSym);
+      setReelCellsEach(reels, win);
       showOutcome(game, data.winnings, data.bet, (sector ? sector.symbol + " " + sector.label : data.resultName));
     } else if (game === "slots") {
       setReelCellsEach(data.reels, win);
@@ -914,7 +949,8 @@
     var r = localPlay(game, bet);
     var win = r.winnings > 0;
     if (game === "roulette") {
-      setReelCells(r.extra.symbol, false, win);
+      var reels2 = threeReelSymbols(r.extra.symbol);
+      setReelCellsEach(reels2, win);
       showOutcome(game, r.winnings, bet, r.extra.symbol + " " + r.resultName);
     } else if (game === "slots") {
       setReelCellsEach(r.extra.reels, win);
@@ -949,6 +985,49 @@
     }, 90);
   }
 
+  // ---------- Промокоды ----------
+  // Промокоды создаёт админ в боте командой /createpromo и проверяет их
+  // подлинность только сервер — здесь их специально нет в коде, чтобы
+  // никто не смог подсмотреть коды через исходники страницы. Поэтому
+  // активация работает только при реальном подключении к боту.
+  function redeemPromo(){
+    var input = document.getElementById("promoInput");
+    var msg = document.getElementById("promoMsg");
+    var code = (input.value || "").trim();
+
+    if (!code) {
+      msg.className = "result-msg lose";
+      msg.textContent = "Введите код";
+      return;
+    }
+    if (!canUseApi()) {
+      msg.className = "result-msg lose";
+      msg.textContent = "Промокоды работают только при открытии через бота";
+      return;
+    }
+
+    msg.className = "result-msg";
+    msg.textContent = "Проверяем...";
+    apiCall("/api/promo", { code: code }, function(err, data){
+      if (err || !data) {
+        msg.className = "result-msg lose";
+        msg.textContent = "Не удалось связаться с сервером, попробуйте позже";
+        return;
+      }
+      if (data.success) {
+        msg.className = "result-msg win";
+        msg.textContent = data.message + " +" + data.amount;
+        input.value = "";
+        applyBalance(data.balance, data.games_played, data.best_win, true);
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+      } else {
+        msg.className = "result-msg lose";
+        msg.textContent = data.message || "Не удалось активировать код";
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+      }
+    });
+  }
+
   // ---------- Инициализация ----------
   initUser();
   renderTabs();
@@ -957,6 +1036,7 @@
   renderPicker();
   renderPaytable();
   document.getElementById("spinBtn").addEventListener("click", play);
+  document.getElementById("promoBtn").addEventListener("click", redeemPromo);
 
   loadState(function(){
     renderBalance(false);

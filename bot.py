@@ -113,12 +113,12 @@ DEFAULT_BET = 10
 
 # --- Рулетка: (название, множитель, вес шанса) ---
 ROULETTE_SECTORS = [
-    ("💥 Мимо",        0.0, 40),
-    ("🍒 x1.5",         1.5, 25),
-    ("🍋 x2",           2.0, 15),
-    ("⭐ x3",           3.0, 10),
-    ("💎 x5",           5.0, 6),
-    ("👑 JACKPOT x10", 10.0, 4),
+    ("💥 Мимо",        0.0, 55),
+    ("🍒 x1.5",         1.5, 20),
+    ("🍋 x2",           2.0, 12),
+    ("⭐ x3",           3.0, 7),
+    ("💎 x5",           5.0, 4),
+    ("👑 JACKPOT x10", 10.0, 2),
 ]
 
 # --- Кости: выигрыш при угадывании грани 1-6, множитель настраивается ---
@@ -126,12 +126,12 @@ DICE_WIN_MULTIPLIER = 5.0  # шанс угадать 1/6
 
 # --- Слоты: символы барабанов и их вес (одинаковый для каждого барабана) ---
 SLOT_SYMBOLS = [
-    ("🍋", 30),
-    ("🍒", 25),
+    ("🍋", 24),
+    ("🍒", 22),
     ("🔔", 20),
-    ("⭐", 15),
-    ("💎", 8),
-    ("7️⃣", 2),
+    ("⭐", 16),
+    ("💎", 12),
+    ("7️⃣", 6),
 ]
 SLOT_TRIPLE_MULTIPLIER = {
     "🍋": 3, "🍒": 4, "🔔": 6, "⭐": 10, "💎": 20, "7️⃣": 50,
@@ -584,6 +584,20 @@ def spin_roulette():
     return random.choices(ROULETTE_SECTORS, weights=weights, k=1)[0]
 
 
+def three_reel_symbols(win_symbol: str, pool: list) -> list:
+    """Возвращает 3 символа для показа в барабане: один из них — реальный
+    результат (win_symbol), остальные два — случайные, но разные между
+    собой символы из того же набора (для наглядности вроде «алмаз, вишня,
+    мимо» вместо трёх одинаковых). Порядок перемешивается."""
+    others_pool = [s for s in pool if s != win_symbol]
+    random.shuffle(others_pool)
+    picks = [win_symbol] + others_pool[:2]
+    while len(picks) < 3:
+        picks.append(win_symbol)
+    random.shuffle(picks)
+    return picks
+
+
 async def roulette(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_user = update.effective_user
     user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
@@ -600,13 +614,14 @@ async def roulette(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     spins = 12
     for i in range(spins):
         delay = 0.08 + (i / spins) * 0.25
-        current = random.choice(reel_symbols)
+        a, b, c = random.sample(reel_symbols, k=min(3, len(reel_symbols)))
         await asyncio.sleep(delay)
-        await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {current} {current} {current} ]")
+        await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {a} {b} {c} ]")
 
     win_symbol = result_name.split()[0]
+    final_a, final_b, final_c = three_reel_symbols(win_symbol, reel_symbols)
     await asyncio.sleep(0.4)
-    await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {win_symbol} {win_symbol} {win_symbol} ]")
+    await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {final_a} {final_b} {final_c} ]")
 
     winnings = int(bet * multiplier)
     new_balance, delta = settle(tg_user.id, bet, winnings)
@@ -1009,7 +1024,10 @@ async def api_play(request):
     if game == "roulette":
         result_name, multiplier, _ = spin_roulette()
         winnings = int(bet * multiplier)
-        payload = {"resultName": result_name, "multiplier": multiplier}
+        win_symbol = result_name.split()[0]
+        reel_pool = [s[0].split()[0] for s in ROULETTE_SECTORS]
+        reels = three_reel_symbols(win_symbol, reel_pool)
+        payload = {"resultName": result_name, "multiplier": multiplier, "reels": reels}
 
     elif game == "dice":
         try:
@@ -1070,12 +1088,56 @@ async def api_play(request):
     return web.json_response(payload, headers=_cors_headers())
 
 
+async def api_promo(request):
+    """POST /api/promo — активировать промокод из мини-приложения.
+    Тело: { initData, code }. Использует ТУ ЖЕ логику (redeem_promo_code),
+    что и команда /promo в самом боте, так что код нельзя активировать
+    дважды, даже если один раз это сделали в чате, а второй — в приложении."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    telegram_id = tg_user["id"]
+    user = get_or_create_user(telegram_id, tg_user.get("username") or "", tg_user.get("first_name") or "")
+    if user["banned"]:
+        return web.json_response(
+            {"error": "banned", "reason": user["ban_reason"] or "без указания причины"},
+            status=403,
+            headers=_cors_headers(),
+        )
+
+    code = (body.get("code") or "").strip()
+    if not code:
+        return web.json_response({"error": "empty_code"}, status=400, headers=_cors_headers())
+
+    success, message, amount = redeem_promo_code(code, telegram_id)
+    updated = get_user(telegram_id)
+    return web.json_response(
+        {
+            "success": success,
+            "message": message,
+            "amount": amount,
+            "balance": updated["balance"],
+            "games_played": updated["games_played"],
+            "best_win": updated["best_win"],
+        },
+        headers=_cors_headers(),
+    )
+
+
 def build_api_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/state", api_state)
     app.router.add_post("/api/play", api_play)
+    app.router.add_post("/api/promo", api_promo)
     app.router.add_route("OPTIONS", "/api/state", _handle_options)
     app.router.add_route("OPTIONS", "/api/play", _handle_options)
+    app.router.add_route("OPTIONS", "/api/promo", _handle_options)
     return app
 
 
