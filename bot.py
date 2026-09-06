@@ -117,7 +117,7 @@ SLOT_SYMBOLS = [
 SLOT_TRIPLE_MULTIPLIER = {
     "🍋": 3, "🍒": 4, "🔔": 6, "⭐": 10, "💎": 20, "7️⃣": 50,
 }
-SLOT_PAIR_MULTIPLIER = 1.2
+SLOT_PAIR_MULTIPLIER = 1.0
 
 # --- Монетка: 50/50 ---
 COINFLIP_WIN_MULTIPLIER = 2
