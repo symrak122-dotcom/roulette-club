@@ -469,13 +469,13 @@
   var BLACKRED_WIN_MULT = 2.0;
 
   var GAMES = {
-    
+    roulette: { title: "Рулетка", pick: null },
     dice:     { title: "Кости", pick: "dice" },
     slots:    { title: "Слоты", pick: null },
     coinflip: { title: "Монетка", pick: "coin" },
     blackred: { title: "Чёрное/красное", pick: "color" }
   };
-  var GAME_ORDER = ["dice", "slots", "coinflip", "blackred"];
+  var GAME_ORDER = ["roulette", "dice", "slots", "coinflip", "blackred"];
 
   var state = {
     userId: "0000",
