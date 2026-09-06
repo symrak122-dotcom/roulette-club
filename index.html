@@ -463,7 +463,7 @@
     { symbol: "7️⃣", weight: 6 }
   ];
   var SLOT_TRIPLE_MULT = { "🍋":3, "🍒":4, "🔔":6, "⭐":10, "💎":20, "7️⃣":50 };
-  var SLOT_PAIR_MULT = 1.2;
+  var SLOT_PAIR_MULT = 1.0;
   var DICE_WIN_MULT = 5.0;
   var COINFLIP_WIN_MULT = 2;
   var BLACKRED_WIN_MULT = 2.0;
@@ -513,7 +513,7 @@
     var el = document.getElementById("syncBadge");
     if (mode === "live") {
       el.className = "sync-badge live";
-      el.textContent = "🔌 Синхронизировано с ботом";
+      el.textContent = "🔌 Синхронизировано";
     } else if (mode === "checking") {
       el.className = "sync-badge";
       el.textContent = "… проверка связи";
