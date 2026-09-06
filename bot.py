@@ -54,7 +54,7 @@ import sqlite3
 import threading
 import urllib.parse
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -245,7 +245,7 @@ def get_or_create_user(telegram_id: int, username: str, first_name: str) -> sqli
             INSERT INTO users (telegram_id, username, first_name, balance, games_played, created_at)
             VALUES (?, ?, ?, ?, 0, ?)
             """,
-            (telegram_id, username, first_name, STARTING_BALANCE, datetime.utcnow().isoformat()),
+            (telegram_id, username, first_name, STARTING_BALANCE, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
         cur = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
@@ -344,7 +344,7 @@ def create_promo_code(code: str, amount: int, max_uses: int, created_by: int) ->
                 INSERT INTO promo_codes (code, amount, max_uses, used_count, created_by, created_at)
                 VALUES (?, ?, ?, 0, ?, ?)
                 """,
-                (code, amount, max_uses, created_by, datetime.utcnow().isoformat()),
+                (code, amount, max_uses, created_by, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
             return True
@@ -386,7 +386,7 @@ def redeem_promo_code(code: str, telegram_id: int):
         # Атомарно фиксируем активацию и начисляем баланс
         conn.execute(
             "INSERT INTO promo_redemptions (code, telegram_id, redeemed_at) VALUES (?, ?, ?)",
-            (code, telegram_id, datetime.utcnow().isoformat()),
+            (code, telegram_id, datetime.now(timezone.utc).isoformat()),
         )
         conn.execute(
             "UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?",
@@ -920,7 +920,7 @@ def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 86
     auth_date = data.get("auth_date")
     if auth_date:
         try:
-            if datetime.utcnow().timestamp() - int(auth_date) > max_age_seconds:
+            if datetime.now(timezone.utc).timestamp() - int(auth_date) > max_age_seconds:
                 return None
         except ValueError:
             pass
