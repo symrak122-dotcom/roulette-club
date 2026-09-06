@@ -1,5 +1,5 @@
 """
-Telegram-бот: профили пользователей + мини-игры казино (виртуальная валюта) + анимации.
+
 
 ВАЖНО:
 - Это ИГРОВАЯ механика с виртуальными очками, НЕ имеющими денежной стоимости
@@ -21,26 +21,7 @@ Telegram-бот: профили пользователей + мини-игры �
 - /games   — меню всех игр
 - /help    — список команд
 
-Хранилище: SQLite (файл bot_database.db), создаётся автоматически.
 
-Мини-приложение (index.html) синхронизировано с ботом: бот поднимает
-собственный HTTP-API (см. секцию "HTTP-API для мини-приложения" ниже)
-на порту из переменной окружения API_PORT (по умолчанию 8080), и
-index.html обращается туда за балансом и результатами игр — так что
-баланс в приложении и в боте всегда одно и то же число из одной базы.
-Этот API нужно опубликовать по HTTPS-адресу (Render/Railway/свой сервер
-с nginx) и указать этот адрес в константе API_BASE_URL внутри index.html.
-
-Установка зависимостей:
-    pip install -r requirements.txt
-
-Запуск (Windows / PowerShell):
-    $env:BOT_TOKEN="твой_токен_от_BotFather"
-    python bot.py
-
-Запуск (Linux / macOS):
-    export BOT_TOKEN="твой_токен_от_BotFather"
-    python bot.py
 """
 
 import asyncio
@@ -104,7 +85,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
