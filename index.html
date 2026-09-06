@@ -439,7 +439,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -463,9 +463,9 @@
     { symbol: "7️⃣", weight: 6 }
   ];
   var SLOT_TRIPLE_MULT = { "🍋":3, "🍒":4, "🔔":6, "⭐":10, "💎":20, "7️⃣":50 };
-  var SLOT_PAIR_MULT = 1.0;
+  var SLOT_PAIR_MULT = 1.2;
   var DICE_WIN_MULT = 5.0;
-  var COINFLIP_WIN_MULT = 2;
+  var COINFLIP_WIN_MULT = 1.9;
   var BLACKRED_WIN_MULT = 2.0;
 
   var GAMES = {
@@ -513,7 +513,7 @@
     var el = document.getElementById("syncBadge");
     if (mode === "live") {
       el.className = "sync-badge live";
-      el.textContent = "🔌 Синхронизировано";
+      el.textContent = "🔌 Синхронизировано с ботом";
     } else if (mode === "checking") {
       el.className = "sync-badge";
       el.textContent = "… проверка связи";
