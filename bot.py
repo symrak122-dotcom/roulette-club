@@ -52,6 +52,7 @@ import logging
 import math
 import os
 import random
+import re
 import sqlite3
 import threading
 import time
@@ -66,7 +67,9 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 # ---------------------------------------------------------------------------
@@ -107,7 +110,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -139,7 +142,7 @@ SLOT_SYMBOLS = [
 SLOT_TRIPLE_MULTIPLIER = {
     "🍋": 3, "🍒": 4, "🔔": 6, "⭐": 10, "💎": 20, "7️⃣": 50,
 }
-SLOT_PAIR_MULTIPLIER = 1.
+SLOT_PAIR_MULTIPLIER = 1.2
 
 # --- Монетка: 50/50 ---
 COINFLIP_WIN_MULTIPLIER = 1.9
@@ -477,6 +480,13 @@ def list_all_users(limit: int = 20, offset: int = 0):
         return rows, total
 
 
+def get_all_user_ids() -> list:
+    """Все telegram_id из базы — используется для рассылки объявлений."""
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        rows = conn.execute("SELECT telegram_id FROM users").fetchall()
+        return [r[0] for r in rows]
+
+
 def set_ban(telegram_id: int, banned: bool, reason: str = None) -> None:
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
@@ -736,7 +746,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🪙 /coinflip [ставка] [орёл|решка] — выигрыш x{COINFLIP_WIN_MULTIPLIER}\n"
         f"🔴⚫ /blackred [ставка] [красное|чёрное] — выигрыш x{BLACKRED_WIN_MULTIPLIER}\n"
         f"🚀 /crash [ставка], затем /cashout — множитель растёт, успей вывести до обрыва (макс. x{CRASH_MAX_MULTIPLIER:.0f})\n\n"
-        "🎟️ /promo КОД — активировать промокод\n\n"
+        "🎟️ /promo КОД — активировать промокод\n"
+        "📩 /support текст — написать в поддержку (ответят прямо тут)\n\n"
         "ℹ️ Валюта в боте виртуальная, не имеет денежной ценности.\n"
         "В каждой игре есть реальный шанс проиграть ставку."
     )
@@ -748,7 +759,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "/ban ID_или_@username [причина] — заблокировать\n"
             "/unban ID_или_@username — снять блокировку\n"
             "/warn ID_или_@username [причина] — выдать предупреждение\n"
-            "/createpromo КОД СУММА [макс_активаций] — создать промокод"
+            "/createpromo КОД СУММА [макс_активаций] — создать промокод\n"
+            "/reply ID текст — ответить в поддержку (или просто Reply на пересланное сообщение)\n"
+            "/broadcast текст — объявление всем пользователям бота"
         )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -1498,6 +1511,133 @@ def run_api_server() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 💬 Поддержка: пользователь пишет — админ отвечает
+# ---------------------------------------------------------------------------
+# Скрытая метка вида "🆔ID:123456789" вшивается в пересланное админу
+# сообщение и невидимо помогает боту понять, кому именно адресован ответ,
+# когда админ использует обычный Reply в Telegram на это сообщение.
+SUPPORT_ID_MARKER = "🆔ID:{}"
+SUPPORT_ID_RE = re.compile(r"🆔ID:(\d+)")
+
+
+async def support_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/support ТЕКСТ — написать в поддержку. Сообщение уходит всем
+    админам; ответить можно либо через Reply на пересланное сообщение,
+    либо командой /reply <ID> <текст>."""
+    tg_user = update.effective_user
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    text = " ".join(context.args) if context.args else ""
+    if not text.strip():
+        await update.message.reply_text("Напиши сообщение так: /support текст твоего вопроса")
+        return
+    if not ADMIN_IDS:
+        await update.message.reply_text("Поддержка временно недоступна, попробуй позже.")
+        return
+
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    header = (
+        f"📩 Сообщение в поддержку\n"
+        f"{SUPPORT_ID_MARKER.format(tg_user.id)}\n"
+        f"От: {tg_user.first_name or 'без имени'} (@{tg_user.username or 'нет username'}), ID профиля {user['internal_id']}\n\n"
+        f"{text}\n\n"
+        f"↩️ Ответь на это сообщение (Reply) или командой /reply {tg_user.id} текст"
+    )
+    delivered = 0
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=header)
+            delivered += 1
+        except Exception:
+            logger.exception("Не удалось переслать сообщение в поддержку админу %s", admin_id)
+
+    if delivered:
+        await update.message.reply_text("✅ Сообщение отправлено в поддержку, жди ответа здесь же.")
+    else:
+        await update.message.reply_text("⚠️ Не удалось доставить сообщение, попробуй позже.")
+
+
+async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/reply <ID пользователя> текст — явный ответ пользователю (админ)."""
+    tg_user = update.effective_user
+    if tg_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /reply <ID пользователя> текст ответа")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID пользователя должен быть числом.")
+        return
+
+    text = " ".join(context.args[1:])
+    try:
+        await context.bot.send_message(chat_id=target_id, text=f"💬 Ответ поддержки:\n\n{text}")
+        await update.message.reply_text("✅ Ответ отправлен.")
+    except Exception:
+        await update.message.reply_text("⚠️ Не удалось отправить — возможно, пользователь заблокировал бота.")
+
+
+async def admin_reply_via_native_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Позволяет админу ответить пользователю просто через обычный Reply
+    на пересланное сообщение поддержки, без набора команды /reply."""
+    tg_user = update.effective_user
+    if tg_user.id not in ADMIN_IDS:
+        return
+    original = update.message.reply_to_message
+    if not original or not original.text:
+        return
+    match = SUPPORT_ID_RE.search(original.text)
+    if not match:
+        return
+
+    target_id = int(match.group(1))
+    text = update.message.text or ""
+    if not text.strip():
+        return
+    try:
+        await context.bot.send_message(chat_id=target_id, text=f"💬 Ответ поддержки:\n\n{text}")
+        await update.message.reply_text("✅ Ответ отправлен.")
+    except Exception:
+        await update.message.reply_text("⚠️ Не удалось отправить — возможно, пользователь заблокировал бота.")
+
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/broadcast ТЕКСТ — объявление всем пользователям бота (админ)."""
+    tg_user = update.effective_user
+    if tg_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Эта команда доступна только администратору.")
+        return
+
+    text = " ".join(context.args) if context.args else ""
+    if not text.strip():
+        await update.message.reply_text("Использование: /broadcast текст объявления")
+        return
+
+    user_ids = get_all_user_ids()
+    if not user_ids:
+        await update.message.reply_text("Пока нет ни одного пользователя для рассылки.")
+        return
+
+    status = await update.message.reply_text(f"📢 Рассылаю объявление {len(user_ids)} пользователям...")
+    sent, failed = 0, 0
+    message_text = f"📢 Объявление\n\n{text}"
+    for uid in user_ids:
+        try:
+            await context.bot.send_message(chat_id=uid, text=message_text)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)  # бережём лимиты Telegram на частоту сообщений
+
+    await safe_edit(status, f"📢 Готово: доставлено {sent}, не удалось {failed} (заблокировали бота или удалили аккаунт).")
+
+
+# ---------------------------------------------------------------------------
 # 🛡️ Админ-панель: список пользователей, баны, предупреждения
 # ---------------------------------------------------------------------------
 
@@ -1876,6 +2016,13 @@ def main() -> None:
     application.add_handler(CommandHandler("ban", ban_user_cmd))
     application.add_handler(CommandHandler("unban", unban_user_cmd))
     application.add_handler(CommandHandler("warn", warn_user_cmd))
+    application.add_handler(CommandHandler("support", support_cmd))
+    application.add_handler(CommandHandler("reply", reply_cmd))
+    application.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    if ADMIN_IDS:
+        application.add_handler(
+            MessageHandler(filters.REPLY & filters.User(list(ADMIN_IDS)) & filters.TEXT, admin_reply_via_native_reply)
+        )
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_callback))
 

@@ -302,6 +302,28 @@
     color: var(--gold);
   }
 
+  .chip-input {
+    flex: 1 1 auto;
+    min-width: 72px;
+    padding: 10px 6px;
+    border-radius: 10px;
+    background: var(--bg-2);
+    border: 1px solid transparent;
+    color: var(--text-0);
+    font-size: clamp(12px, 3.4vw, 14px);
+    font-weight: 600;
+    text-align: center;
+    outline: none;
+    font-family: inherit;
+    transition: border-color .15s ease;
+  }
+  .chip-input::placeholder { color: var(--text-1); }
+  .chip-input:focus { border-color: var(--gold); }
+  .chip-input.active { border-color: var(--gold); color: var(--gold); }
+  .chip-input::-webkit-outer-spin-button,
+  .chip-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .chip-input[type=number] { -moz-appearance: textfield; }
+
   .spin-btn {
     width: 100%;
     padding: clamp(14px, 4vw, 18px);
@@ -505,7 +527,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -552,6 +574,7 @@
     games: 0,
     bestWin: 0,
     bet: BET_OPTIONS[0],
+    customBetActive: false,
     game: "roulette",
     dicePick: 4,
     coinPick: "орёл",
@@ -656,15 +679,55 @@
     row.innerHTML = "";
     BET_OPTIONS.forEach(function(v){
       var chip = document.createElement("div");
-      chip.className = "chip" + (v === state.bet ? " active" : "");
+      chip.className = "chip" + (v === state.bet && !state.customBetActive ? " active" : "");
       chip.textContent = v;
       chip.onclick = function(){
         if (state.spinning) return;
         state.bet = v;
+        state.customBetActive = false;
         renderBetRow();
       };
       row.appendChild(chip);
     });
+    row.appendChild(buildCustomBetInput(
+      state.customBetActive ? state.bet : "",
+      function(val){
+        state.bet = val;
+        state.customBetActive = true;
+        clearChipActive(row);
+      },
+      function(){ return state.spinning; }
+    ));
+  }
+
+  // Общий конструктор поля "своя ставка" — используется и для обычных
+  // игр, и для краша. onInput вызывается только на валидное целое > 0,
+  // чтобы не сбрасывать ставку при недописанном вводе.
+  function buildCustomBetInput(initialValue, onInput, isLockedFn){
+    var input = document.createElement("input");
+    input.type = "number";
+    input.min = "1";
+    input.step = "1";
+    input.inputMode = "numeric";
+    input.className = "chip-input" + (initialValue !== "" ? " active" : "");
+    input.placeholder = "Своя";
+    if (initialValue !== "") input.value = initialValue;
+    input.addEventListener("input", function(){
+      if (isLockedFn && isLockedFn()) return;
+      var val = parseInt(input.value, 10);
+      if (val > 0) {
+        input.classList.add("active");
+        onInput(val);
+      } else {
+        input.classList.remove("active");
+      }
+    });
+    input.addEventListener("click", function(e){ e.stopPropagation(); });
+    return input;
+  }
+
+  function clearChipActive(row){
+    row.querySelectorAll(".chip").forEach(function(c){ c.classList.remove("active"); });
   }
 
   // ---------- Табы игр ----------
@@ -1137,6 +1200,7 @@
   // к боту вкладка просто объясняет, что нужно открыть через Telegram.
   var crashUI = {
     bet: BET_OPTIONS[0],
+    customBetActive: false,
     pollTimer: null,
     lastRoundId: null,
     myBetThisRound: false,
@@ -1148,14 +1212,24 @@
     row.innerHTML = "";
     BET_OPTIONS.forEach(function(v){
       var chip = document.createElement("div");
-      chip.className = "chip" + (v === crashUI.bet ? " active" : "");
+      chip.className = "chip" + (v === crashUI.bet && !crashUI.customBetActive ? " active" : "");
       chip.textContent = v;
       chip.onclick = function(){
         crashUI.bet = v;
+        crashUI.customBetActive = false;
         renderCrashBetRow();
       };
       row.appendChild(chip);
     });
+    row.appendChild(buildCustomBetInput(
+      crashUI.customBetActive ? crashUI.bet : "",
+      function(val){
+        crashUI.bet = val;
+        crashUI.customBetActive = true;
+        clearChipActive(row);
+      },
+      function(){ return crashUI.myBetThisRound; }
+    ));
   }
 
   function renderCrashHistory(history){
