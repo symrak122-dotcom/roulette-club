@@ -224,6 +224,10 @@
     border-color: var(--gold);
     box-shadow: 0 0 0 1px var(--gold) inset;
   }
+  .reel-cell.lose-outline {
+    border-color: var(--text-1);
+    box-shadow: 0 0 0 1px var(--text-1) inset;
+  }
   .reel-cell.spinning { animation: pulse .3s ease infinite alternate; }
   @keyframes pulse { from { transform: scale(1); } to { transform: scale(.94); } }
 
@@ -340,6 +344,54 @@
   .paytable-row:last-child { border-bottom: none; }
   .paytable-row span:first-child { color: var(--text-1); }
 
+  /* ---------- Краш: полоса истории + табло множителя ---------- */
+  .crash-history {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-bottom: clamp(10px, 3vw, 16px);
+    scrollbar-width: none;
+  }
+  .crash-history::-webkit-scrollbar { display: none; }
+  .crash-history-item {
+    flex: 0 0 auto;
+    padding: 5px 10px;
+    border-radius: 20px;
+    font-size: clamp(11px, 2.8vw, 13px);
+    font-weight: 700;
+    background: var(--bg-2);
+  }
+  .crash-history-item.low { color: var(--danger); }
+  .crash-history-item.mid { color: var(--text-0); }
+  .crash-history-item.high { color: var(--gold); }
+
+  .crash-stage {
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    border-radius: var(--radius);
+    padding: clamp(24px, 8vw, 40px) clamp(14px, 4vw, 22px);
+    text-align: center;
+    margin-bottom: clamp(16px, 4.5vw, 22px);
+    transition: border-color .2s ease;
+  }
+  .crash-stage.running { border-color: var(--gold); }
+  .crash-stage.crashed { border-color: var(--danger); }
+  .crash-mult {
+    font-size: clamp(38px, 12vw, 60px);
+    font-weight: 800;
+    color: var(--text-0);
+    font-variant-numeric: tabular-nums;
+    transition: color .2s ease;
+  }
+  .crash-stage.running .crash-mult { color: var(--gold); }
+  .crash-stage.crashed .crash-mult { color: var(--danger); }
+  .crash-status {
+    margin-top: 8px;
+    font-size: clamp(12px, 3.2vw, 14px);
+    color: var(--text-1);
+  }
+
   .footnote {
     text-align: center;
     color: var(--text-1);
@@ -417,6 +469,20 @@
   <button class="spin-btn" id="spinBtn">Крутить</button>
   <div class="result-msg" id="resultMsg">Выбери ставку и жми «Крутить»</div>
 
+  <div id="crashPanel" style="display:none;">
+    <div class="crash-history" id="crashHistory"></div>
+    <div class="crash-stage" id="crashStageBox">
+      <div class="crash-mult" id="crashMult">1.00x</div>
+      <div class="crash-status" id="crashStatus">Загрузка раунда...</div>
+    </div>
+    <div class="bet-row" id="crashBetRow"></div>
+    <button class="spin-btn" id="crashActionBtn" disabled>Подождите...</button>
+    <div class="result-msg" id="crashMsg"></div>
+    <div class="footnote" style="margin-top:14px;">
+      Большинство раундов обрываются до ×2. Очень редко множитель может дойти до максимума ×100 — но шанс на это крайне мал.
+    </div>
+  </div>
+
   <div class="paytable" id="paytable">
     <div class="section-title" style="margin-bottom:10px;">Таблица выигрышей</div>
   </div>
@@ -439,7 +505,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -463,9 +529,9 @@
     { symbol: "7️⃣", weight: 6 }
   ];
   var SLOT_TRIPLE_MULT = { "🍋":3, "🍒":4, "🔔":6, "⭐":10, "💎":20, "7️⃣":50 };
-  var SLOT_PAIR_MULT = 1.0;
+  var SLOT_PAIR_MULT = 1.2;
   var DICE_WIN_MULT = 5.0;
-  var COINFLIP_WIN_MULT = 2.0;
+  var COINFLIP_WIN_MULT = 1.9;
   var BLACKRED_WIN_MULT = 2.0;
 
   var GAMES = {
@@ -473,9 +539,10 @@
     dice:     { title: "Кости", pick: "dice" },
     slots:    { title: "Слоты", pick: null },
     coinflip: { title: "Монетка", pick: "coin" },
-    blackred: { title: "Чёрное/красное", pick: "color" }
+    blackred: { title: "Чёрное/красное", pick: "color" },
+    crash:    { title: "Краш", pick: null, custom: true }
   };
-  var GAME_ORDER = ["roulette", "dice", "slots", "coinflip", "blackred"];
+  var GAME_ORDER = ["roulette", "dice", "slots", "coinflip", "blackred", "crash"];
 
   var state = {
     userId: "0000",
@@ -620,12 +687,32 @@
   function switchGame(){
     renderTabs();
     document.getElementById("gameTitle").textContent = GAMES[state.game].title;
+
+    var isCrash = !!GAMES[state.game].custom;
+    var standardIds = ["stage", "pickerRow", "betRow", "spinBtn", "resultMsg", "paytable"];
+    standardIds.forEach(function(id){
+      document.getElementById(id).style.display = isCrash ? "none" : "";
+    });
+    document.getElementById("crashPanel").style.display = isCrash ? "" : "none";
+
+    if (isCrash) {
+      stopStandardForCrash();
+      startCrashPolling();
+      return;
+    }
+    stopCrashPolling();
+
     renderStageIdle();
     renderPicker();
     renderPaytable();
     var msg = document.getElementById("resultMsg");
     msg.className = "result-msg";
     msg.textContent = "Выбери ставку и жми «Крутить»";
+  }
+
+  function stopStandardForCrash(){
+    // На случай, если переключились на краш посреди анимации другой игры.
+    state.spinning = false;
   }
 
   // ---------- Пикеры (число кости / орёл-решка / цвет) ----------
@@ -737,13 +824,20 @@
     }
   }
 
-  function setReelCellsEach(symbols, win){
+  function setReelCellsEach(symbols, win, highlightIndex){
     for (var i=0;i<3;i++){
       var cell = document.getElementById("cell"+i);
       if (!cell) continue;
       cell.textContent = symbols[i];
       cell.classList.remove("spinning");
-      cell.classList.toggle("win", !!win);
+      if (typeof highlightIndex === "number") {
+        // Подсвечиваем только ячейку с настоящим результатом — остальные
+        // 2 чисто декоративные и не должны выглядеть как "тоже выиграли".
+        cell.classList.toggle("win", i === highlightIndex && !!win);
+        cell.classList.toggle("lose-outline", i === highlightIndex && !win);
+      } else {
+        cell.classList.toggle("win", !!win);
+      }
     }
   }
 
@@ -768,9 +862,10 @@
     return list[list.length-1];
   }
 
-  // Возвращает 3 символа для барабана рулетки: один из них — реальный
-  // результат (winSymbol), два других — случайные, но разные между собой
-  // символы из того же набора (например 💎 🍒 💥 вместо трёх одинаковых).
+  // Возвращает { reels: [3 символа], index: индекс настоящего результата }.
+  // Один из символов — реальный результат (winSymbol), два других —
+  // случайные, но разные между собой символы из того же набора
+  // (например 💎 🍒 💥 вместо трёх одинаковых).
   function threeReelSymbols(winSymbol){
     var pool = ROULETTE_SECTORS.map(function(s){ return s.symbol; });
     var others = pool.filter(function(s){ return s !== winSymbol; });
@@ -784,7 +879,7 @@
       var m = Math.floor(Math.random() * (k + 1));
       var t2 = picks[k]; picks[k] = picks[m]; picks[m] = t2;
     }
-    return picks;
+    return { reels: picks, index: picks.indexOf(winSymbol) };
   }
 
   function localPlay(game, bet){
@@ -922,11 +1017,18 @@
   function finishWithServer(game, data){
     var win = data.winnings > 0;
     if (game === "roulette") {
-      var sector = ROULETTE_SECTORS.filter(function(s){ return s.label === data.resultName; })[0];
-      var winSym = sector ? sector.symbol : "❔";
-      var reels = (data.reels && data.reels.length === 3) ? data.reels : threeReelSymbols(winSym);
-      setReelCellsEach(reels, win);
-      showOutcome(game, data.winnings, data.bet, (sector ? sector.symbol + " " + sector.label : data.resultName));
+      var winSym = data.resultName.split(" ")[0];
+      var reels, idx;
+      if (data.reels && data.reels.length === 3) {
+        reels = data.reels;
+        idx = (typeof data.resultIndex === "number") ? data.resultIndex : reels.indexOf(winSym);
+      } else {
+        var built = threeReelSymbols(winSym);
+        reels = built.reels;
+        idx = built.index;
+      }
+      setReelCellsEach(reels, win, idx);
+      showOutcome(game, data.winnings, data.bet, data.resultName);
     } else if (game === "slots") {
       setReelCellsEach(data.reels, win);
       showOutcome(game, data.winnings, data.bet, data.reels.join(" "));
@@ -949,8 +1051,8 @@
     var r = localPlay(game, bet);
     var win = r.winnings > 0;
     if (game === "roulette") {
-      var reels2 = threeReelSymbols(r.extra.symbol);
-      setReelCellsEach(reels2, win);
+      var built2 = threeReelSymbols(r.extra.symbol);
+      setReelCellsEach(built2.reels, win, built2.index);
       showOutcome(game, r.winnings, bet, r.extra.symbol + " " + r.resultName);
     } else if (game === "slots") {
       setReelCellsEach(r.extra.reels, win);
@@ -1028,6 +1130,180 @@
     });
   }
 
+  // ---------- Краш: живой опрос общего раунда с сервера ----------
+  // Раунд существует только на сервере (bot.py) — здесь нет локального
+  // демо-режима, как в остальных играх, потому что "общий раунд для всех"
+  // невозможно честно сымитировать в одиночку в браузере. Без подключения
+  // к боту вкладка просто объясняет, что нужно открыть через Telegram.
+  var crashUI = {
+    bet: BET_OPTIONS[0],
+    pollTimer: null,
+    lastRoundId: null,
+    myBetThisRound: false,
+    cashedOutThisRound: false
+  };
+
+  function renderCrashBetRow(){
+    var row = document.getElementById("crashBetRow");
+    row.innerHTML = "";
+    BET_OPTIONS.forEach(function(v){
+      var chip = document.createElement("div");
+      chip.className = "chip" + (v === crashUI.bet ? " active" : "");
+      chip.textContent = v;
+      chip.onclick = function(){
+        crashUI.bet = v;
+        renderCrashBetRow();
+      };
+      row.appendChild(chip);
+    });
+  }
+
+  function renderCrashHistory(history){
+    var wrap = document.getElementById("crashHistory");
+    wrap.innerHTML = "";
+    history.forEach(function(point){
+      var el = document.createElement("div");
+      var cls = point < 2 ? "low" : (point < 10 ? "mid" : "high");
+      el.className = "crash-history-item " + cls;
+      el.textContent = point.toFixed(2) + "x";
+      wrap.appendChild(el);
+    });
+    if (history.length === 0) {
+      wrap.innerHTML = '<div class="crash-history-item">пока нет истории</div>';
+    }
+  }
+
+  function startCrashPolling(){
+    if (crashUI.pollTimer) return;
+    pollCrashOnce();
+    crashUI.pollTimer = setInterval(pollCrashOnce, 500);
+  }
+
+  function stopCrashPolling(){
+    if (crashUI.pollTimer) {
+      clearInterval(crashUI.pollTimer);
+      crashUI.pollTimer = null;
+    }
+  }
+
+  function pollCrashOnce(){
+    var box = document.getElementById("crashStageBox");
+    var multEl = document.getElementById("crashMult");
+    var statusEl = document.getElementById("crashStatus");
+    var btn = document.getElementById("crashActionBtn");
+
+    if (!canUseApi()) {
+      box.className = "crash-stage";
+      multEl.textContent = "—";
+      statusEl.textContent = "Краш работает только при открытии через бота";
+      btn.disabled = true;
+      btn.textContent = "Недоступно";
+      renderCrashHistory([]);
+      return;
+    }
+
+    apiCall("/api/crash/state", {}, function(err, data){
+      if (err || !data) {
+        statusEl.textContent = "Нет связи с сервером, повторяем...";
+        return;
+      }
+
+      if (crashUI.lastRoundId !== null && data.roundId !== crashUI.lastRoundId) {
+        // Начался новый раунд — сбрасываем локальные пометки.
+        crashUI.myBetThisRound = false;
+        crashUI.cashedOutThisRound = false;
+      }
+      crashUI.lastRoundId = data.roundId;
+
+      renderCrashHistory(data.history || []);
+      multEl.textContent = data.multiplier.toFixed(2) + "x";
+      box.className = "crash-stage" + (data.phase === "running" ? " running" : data.phase === "crashed" ? " crashed" : "");
+
+      var hasBet = !!data.myBet;
+      if (hasBet) crashUI.myBetThisRound = true;
+      var cashedOut = hasBet && data.myBet.cashedOutAt !== null;
+      if (cashedOut) crashUI.cashedOutThisRound = true;
+
+      if (data.phase === "waiting") {
+        statusEl.textContent = "Приём ставок: " + Math.ceil(data.waitRemaining) + " сек до старта";
+        if (crashUI.myBetThisRound) {
+          btn.disabled = true;
+          btn.textContent = "Ставка принята, жди старта";
+        } else {
+          btn.disabled = false;
+          btn.textContent = "Поставить " + crashUI.bet;
+        }
+      } else if (data.phase === "running") {
+        if (hasBet && !cashedOut) {
+          statusEl.textContent = "Раунд идёт — успей вывести!";
+          btn.disabled = false;
+          btn.textContent = "Вывести ×" + data.multiplier.toFixed(2);
+        } else if (cashedOut) {
+          statusEl.textContent = "Ты уже вывел в этом раунде на ×" + data.myBet.cashedOutAt.toFixed(2);
+          btn.disabled = true;
+          btn.textContent = "Ждём обрыва...";
+        } else {
+          statusEl.textContent = "Раунд уже идёт, ты не успел поставить";
+          btn.disabled = true;
+          btn.textContent = "Жди следующий раунд";
+        }
+      } else if (data.phase === "crashed") {
+        statusEl.textContent = "💥 Обрыв на ×" + data.crashPoint.toFixed(2) + " — новый раунд скоро";
+        btn.disabled = true;
+        btn.textContent = "Новый раунд скоро...";
+      }
+    });
+  }
+
+  function crashPlaceBet(){
+    if (!canUseApi()) return;
+    var msg = document.getElementById("crashMsg");
+    var btn = document.getElementById("crashActionBtn");
+    btn.disabled = true;
+    apiCall("/api/crash/bet", { bet: crashUI.bet }, function(err, data){
+      if (err || !data || !data.success) {
+        msg.className = "result-msg lose";
+        msg.textContent = (data && data.message) ? data.message : "Не удалось поставить";
+        pollCrashOnce();
+        return;
+      }
+      crashUI.myBetThisRound = true;
+      msg.className = "result-msg";
+      msg.textContent = "Ставка " + crashUI.bet + " принята!";
+      applyBalance(data.balance, data.games_played, data.best_win, true);
+      pollCrashOnce();
+    });
+  }
+
+  function crashDoCashOut(){
+    if (!canUseApi()) return;
+    var msg = document.getElementById("crashMsg");
+    var btn = document.getElementById("crashActionBtn");
+    btn.disabled = true;
+    apiCall("/api/crash/cashout", {}, function(err, data){
+      if (err || !data || !data.success) {
+        msg.className = "result-msg lose";
+        msg.textContent = (data && data.message) ? data.message : "Не удалось вывести — возможно, уже поздно";
+        pollCrashOnce();
+        return;
+      }
+      crashUI.cashedOutThisRound = true;
+      msg.className = "result-msg win";
+      msg.textContent = "Выведено на ×" + data.multiplier.toFixed(2) + "! Выигрыш +" + data.winnings;
+      applyBalance(data.balance, data.games_played, data.best_win, true);
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+      pollCrashOnce();
+    });
+  }
+
+  function crashActionClick(){
+    if (crashUI.myBetThisRound) {
+      crashDoCashOut();
+    } else {
+      crashPlaceBet();
+    }
+  }
+
   // ---------- Инициализация ----------
   initUser();
   renderTabs();
@@ -1035,8 +1311,10 @@
   renderStageIdle();
   renderPicker();
   renderPaytable();
+  renderCrashBetRow();
   document.getElementById("spinBtn").addEventListener("click", play);
   document.getElementById("promoBtn").addEventListener("click", redeemPromo);
+  document.getElementById("crashActionBtn").addEventListener("click", crashActionClick);
 
   loadState(function(){
     renderBalance(false);

@@ -1,5 +1,5 @@
 """
-
+Telegram-бот: профили пользователей + мини-игры казино (виртуальная валюта) + анимации.
 
 ВАЖНО:
 - Это ИГРОВАЯ механика с виртуальными очками, НЕ имеющими денежной стоимости
@@ -14,6 +14,7 @@
 - 🎯 Слоты         /slots [ставка]
 - 🪙 Монетка       /coinflip [ставка] [орёл|решка]
 - 🔴⚫ Чёрное/красное /blackred [ставка] [красное|чёрное]
+- 🚀 Краш           /crash [ставка] затем /cashout — общий раунд с мини-приложением
 
 Прочее:
 - /start   — создание профиля (уникальный ID) + анимация загрузки
@@ -21,7 +22,26 @@
 - /games   — меню всех игр
 - /help    — список команд
 
+Хранилище: SQLite (файл bot_database.db), создаётся автоматически.
 
+Мини-приложение (index.html) синхронизировано с ботом: бот поднимает
+собственный HTTP-API (см. секцию "HTTP-API для мини-приложения" ниже)
+на порту из переменной окружения API_PORT (по умолчанию 8080), и
+index.html обращается туда за балансом и результатами игр — так что
+баланс в приложении и в боте всегда одно и то же число из одной базы.
+Этот API нужно опубликовать по HTTPS-адресу (Render/Railway/свой сервер
+с nginx) и указать этот адрес в константе API_BASE_URL внутри index.html.
+
+Установка зависимостей:
+    pip install -r requirements.txt
+
+Запуск (Windows / PowerShell):
+    $env:BOT_TOKEN="твой_токен_от_BotFather"
+    python bot.py
+
+Запуск (Linux / macOS):
+    export BOT_TOKEN="твой_токен_от_BotFather"
+    python bot.py
 """
 
 import asyncio
@@ -29,10 +49,12 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import random
 import sqlite3
 import threading
+import time
 import urllib.parse
 from contextlib import closing
 from datetime import datetime, timezone
@@ -85,7 +107,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -117,10 +139,10 @@ SLOT_SYMBOLS = [
 SLOT_TRIPLE_MULTIPLIER = {
     "🍋": 3, "🍒": 4, "🔔": 6, "⭐": 10, "💎": 20, "7️⃣": 50,
 }
-SLOT_PAIR_MULTIPLIER = 1.0
+SLOT_PAIR_MULTIPLIER = 1.2
 
 # --- Монетка: 50/50 ---
-COINFLIP_WIN_MULTIPLIER = 2.0
+COINFLIP_WIN_MULTIPLIER = 1.9
 
 # --- Чёрное/красное: классическая рулеточная раскладка (европейская, зеро одно) ---
 # 18 красных + 18 чёрных + 1 зелёное зеро = 37 секторов.
@@ -128,6 +150,180 @@ BLACKRED_RED_COUNT = 18
 BLACKRED_BLACK_COUNT = 18
 BLACKRED_GREEN_COUNT = 1
 BLACKRED_WIN_MULTIPLIER = 2.0
+
+# --- Краш: множитель растёт со временем, игрок должен успеть "забрать"
+# выигрыш до того, как раунд оборвётся на случайной точке. Точка обрыва
+# выбирается по "корзинам" — как и в рулетке/слотах, так проще держать
+# под контролем реальную частоту исходов, а не подбирать формулу вслепую.
+# В большинстве случаев обрыв происходит до x2, и совсем редко долетает
+# до потолка x100.
+CRASH_BUCKETS = [
+    # (мин.множитель, макс.множитель, вес)
+    (1.00, 1.20, 35),
+    (1.20, 1.50, 25),
+    (1.50, 2.00, 20),
+    (2.00, 3.00, 10),
+    (3.00, 5.00, 5),
+    (5.00, 10.00, 3),
+    (10.00, 30.00, 1.5),
+    (30.00, 100.00, 0.5),
+]
+CRASH_GROWTH_K = 0.14          # скорость роста множителя (см. current_crash_multiplier)
+CRASH_WAIT_SECONDS = 5         # окно для ставок перед стартом раунда
+CRASH_RESULT_PAUSE = 3         # пауза после краша перед следующим раундом
+CRASH_HISTORY_LIMIT = 20
+CRASH_MAX_MULTIPLIER = 100.0
+
+
+def generate_crash_point() -> float:
+    bucket = random.choices(CRASH_BUCKETS, weights=[b[2] for b in CRASH_BUCKETS], k=1)[0]
+    lo, hi, _ = bucket
+    return round(random.uniform(lo, hi), 2)
+
+
+def current_crash_multiplier(elapsed: float, crash_point: float) -> float:
+    """Множитель в текущий момент раунда: растёт экспоненциально с
+    начала раунда и никогда не превышает точку обрыва этого раунда."""
+    value = math.exp(CRASH_GROWTH_K * max(elapsed, 0))
+    return round(min(value, crash_point), 2)
+
+
+def seconds_to_reach(crash_point: float) -> float:
+    """Через сколько секунд после старта раунда множитель дорастёт ровно
+    до crash_point (момент обрыва)."""
+    if crash_point <= 1.0:
+        return 0.0
+    return math.log(crash_point) / CRASH_GROWTH_K
+
+
+# Общее состояние раунда "Краш" — единое и для Telegram-команд, и для
+# API мини-приложения, чтобы оба интерфейса играли один и тот же раунд
+# с одним и тем же результатом. Доступ защищён локом, т.к. бот и API
+# работают в разных потоках/циклах событий.
+crash_lock = threading.Lock()
+crash_state = {
+    "round_id": 0,
+    "phase": "waiting",  # waiting | running | crashed
+    "phase_started_at": time.time(),
+    "crash_point": 1.0,
+    "bets": {},          # telegram_id -> {"bet": int, "name": str, "cashed_out_at": float|None}
+    "history": [],       # последние точки обрыва, самая новая — первая
+}
+
+
+def finalize_crash_payout(telegram_id: int, winnings: int):
+    """Начисляет выигрыш (0, если проиграл — ставка уже списана в момент
+    входа в раунд) и обновляет статистику игр/рекорд, как settle()."""
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE users SET balance = balance + ?, games_played = games_played + 1, "
+            "best_win = CASE WHEN ? > best_win THEN ? ELSE best_win END WHERE telegram_id = ?",
+            (winnings, winnings, winnings, telegram_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT balance, best_win FROM users WHERE telegram_id = ?", (telegram_id,)
+        ).fetchone()
+        return row[0], row[1]
+
+
+def crash_snapshot():
+    """Безопасный (под локом) снимок текущего состояния раунда для показа
+    пользователю: фаза, текущий множитель, история, есть ли активная
+    ставка. Не читает и не пишет ничего внешнего."""
+    with crash_lock:
+        phase = crash_state["phase"]
+        elapsed = time.time() - crash_state["phase_started_at"]
+        crash_point = crash_state["crash_point"]
+        if phase == "running":
+            mult = current_crash_multiplier(elapsed, crash_point)
+        elif phase == "crashed":
+            mult = crash_point
+        else:
+            mult = 1.0
+        return {
+            "phase": phase,
+            "round_id": crash_state["round_id"],
+            "multiplier": mult,
+            "wait_remaining": max(0.0, CRASH_WAIT_SECONDS - elapsed) if phase == "waiting" else 0.0,
+            "crash_point": crash_point if phase == "crashed" else None,
+            "history": list(crash_state["history"]),
+            "bets_snapshot": dict(crash_state["bets"]),
+        }
+
+
+def crash_place_bet(telegram_id: int, name: str, bet: int):
+    with crash_lock:
+        if crash_state["phase"] != "waiting":
+            return False, "Ставки принимаются только перед стартом раунда, дождись следующего."
+        if telegram_id in crash_state["bets"]:
+            return False, "Ты уже поставил в этом раунде."
+        crash_state["bets"][telegram_id] = {"bet": bet, "name": name, "cashed_out_at": None}
+    update_balance(telegram_id, -bet)
+    return True, "Ставка принята."
+
+
+def crash_cash_out(telegram_id: int):
+    with crash_lock:
+        if crash_state["phase"] != "running":
+            return False, "Раунд сейчас не идёт.", None, None
+        entry = crash_state["bets"].get(telegram_id)
+        if not entry:
+            return False, "У тебя нет активной ставки в этом раунде.", None, None
+        if entry["cashed_out_at"] is not None:
+            return False, "Ты уже вывел ставку в этом раунде.", None, None
+        elapsed = time.time() - crash_state["phase_started_at"]
+        mult = current_crash_multiplier(elapsed, crash_state["crash_point"])
+        entry["cashed_out_at"] = mult
+        bet = entry["bet"]
+    winnings = int(bet * mult)
+    new_balance, best_win = finalize_crash_payout(telegram_id, winnings)
+    return True, "Выведено.", winnings, {"multiplier": mult, "balance": new_balance, "best_win": best_win, "bet": bet}
+
+
+def _crash_settle_round_losses():
+    """Вызывается планировщиком сразу после обрыва: те, кто не успел
+    вывести ставку, её теряют (она уже списана при входе в раунд, здесь
+    просто фиксируем игру в статистике)."""
+    with crash_lock:
+        bets = dict(crash_state["bets"])
+    for telegram_id, entry in bets.items():
+        if entry["cashed_out_at"] is None:
+            finalize_crash_payout(telegram_id, 0)
+
+
+def crash_scheduler() -> None:
+    """Бесконечный цикл раундов краша в отдельном потоке: ожидание ставок
+    → рост множителя → обрыв → пауза → снова ожидание. Работает всегда,
+    независимо от того, играет ли кто-то сейчас — так и бот, и мини-
+    приложение всегда видят один и тот же текущий раунд."""
+    while True:
+        try:
+            with crash_lock:
+                crash_state["phase"] = "waiting"
+                crash_state["phase_started_at"] = time.time()
+                crash_state["bets"] = {}
+                crash_state["round_id"] += 1
+            time.sleep(CRASH_WAIT_SECONDS)
+
+            crash_point = generate_crash_point()
+            with crash_lock:
+                crash_state["phase"] = "running"
+                crash_state["phase_started_at"] = time.time()
+                crash_state["crash_point"] = crash_point
+            time.sleep(max(seconds_to_reach(crash_point), 0.0))
+
+            with crash_lock:
+                crash_state["phase"] = "crashed"
+                crash_state["phase_started_at"] = time.time()
+            _crash_settle_round_losses()
+            with crash_lock:
+                crash_state["history"].insert(0, crash_point)
+                crash_state["history"] = crash_state["history"][:CRASH_HISTORY_LIMIT]
+            time.sleep(CRASH_RESULT_PAUSE)
+        except Exception:
+            logger.exception("Ошибка в планировщике краша, продолжаем через секунду")
+            time.sleep(1)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -442,10 +638,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     frames = [
         "⏳ Загрузка········ 10%",
-        "⏳ Загрузка········ 13%",
         "⏳ Загрузка▓········ 25%",
         "⏳ Загрузка▓▓▓······· 45%",
-        "⏳ Загрузка▓▓▓▓▓····· 65%",
         "⏳ Загрузка▓▓▓▓▓····· 65%",
         "⏳ Загрузка▓▓▓▓▓▓▓··· 85%",
         "✅ Загрузка▓▓▓▓▓▓▓▓▓▓ 100%",
@@ -540,14 +734,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🎲 /dice [ставка] [1-6] — родная Telegram-анимация кубика, выигрыш x{DICE_WIN_MULTIPLIER}\n"
         f"🎯 /slots [ставка] — три барабана, совпадения дают выигрыш\n"
         f"🪙 /coinflip [ставка] [орёл|решка] — выигрыш x{COINFLIP_WIN_MULTIPLIER}\n"
-        f"🔴⚫ /blackred [ставка] [красное|чёрное] — выигрыш x{BLACKRED_WIN_MULTIPLIER}\n\n"
+        f"🔴⚫ /blackred [ставка] [красное|чёрное] — выигрыш x{BLACKRED_WIN_MULTIPLIER}\n"
+        f"🚀 /crash [ставка], затем /cashout — множитель растёт, успей вывести до обрыва (макс. x{CRASH_MAX_MULTIPLIER:.0f})\n\n"
         "🎟️ /promo КОД — активировать промокод\n\n"
         "ℹ️ Валюта в боте виртуальная, не имеет денежной ценности.\n"
         "В каждой игре есть реальный шанс проиграть ставку."
     )
     if tg_user.id in ADMIN_IDS:
         text += (
-            "\n\n🛡️ <b>Админ-командыдля rifoliv:</b>\n"
+            "\n\n🛡️ <b>Админ-команды:</b>\n"
             "/users [страница] — список всех пользователей\n"
             "/userinfo ID_или_@username — подробная информация\n"
             "/ban ID_или_@username [причина] — заблокировать\n"
@@ -567,18 +762,21 @@ def spin_roulette():
     return random.choices(ROULETTE_SECTORS, weights=weights, k=1)[0]
 
 
-def three_reel_symbols(win_symbol: str, pool: list) -> list:
-    """Возвращает 3 символа для показа в барабане: один из них — реальный
-    результат (win_symbol), остальные два — случайные, но разные между
-    собой символы из того же набора (для наглядности вроде «алмаз, вишня,
-    мимо» вместо трёх одинаковых). Порядок перемешивается."""
+def three_reel_symbols(win_symbol: str, pool: list):
+    """Возвращает (список из 3 символов для барабана, индекс настоящего
+    результата в этом списке). Один символ — реальный итог (win_symbol),
+    остальные два — случайные, но разные между собой символы из того же
+    набора (для наглядности вроде «алмаз, вишня, мимо» вместо трёх
+    одинаковых). Индекс нужен, чтобы подсвечивать золотой/красной рамкой
+    именно настоящий результат, а не все 3 ячейки сразу — иначе казалось
+    бы, что выиграли все символы разом, даже декоративные."""
     others_pool = [s for s in pool if s != win_symbol]
     random.shuffle(others_pool)
     picks = [win_symbol] + others_pool[:2]
     while len(picks) < 3:
         picks.append(win_symbol)
     random.shuffle(picks)
-    return picks
+    return picks, picks.index(win_symbol)
 
 
 async def roulette(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -602,7 +800,8 @@ async def roulette(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {a} {b} {c} ]")
 
     win_symbol = result_name.split()[0]
-    final_a, final_b, final_c = three_reel_symbols(win_symbol, reel_symbols)
+    final_symbols, _ = three_reel_symbols(win_symbol, reel_symbols)
+    final_a, final_b, final_c = final_symbols
     await asyncio.sleep(0.4)
     await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {final_a} {final_b} {final_c} ]")
 
@@ -865,6 +1064,54 @@ async def blackred(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 🚀 Краш — общий раунд для бота и мини-приложения (см. crash_scheduler)
+# ---------------------------------------------------------------------------
+
+async def crash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/crash СТАВКА — поставить в текущем раунде краша. Раунд общий с
+    мини-приложением: поставить можно тут, а вывести — хоть в приложении,
+    и наоборот. Дальше используй /cashout, чтобы забрать выигрыш до того,
+    как раунд оборвётся."""
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    bet = parse_bet(context)
+    if not await check_bet(update, user, bet):
+        return
+
+    ok, message = crash_place_bet(tg_user.id, tg_user.first_name or "Игрок", bet)
+    if not ok:
+        await update.message.reply_text(f"⛔ {message}")
+        return
+
+    await update.message.reply_text(
+        f"🚀 Ставка {bet} принята в текущем раунде краша.\n"
+        f"Как только раунд начнётся, множитель будет расти — используй /cashout, "
+        f"чтобы забрать выигрыш до обрыва. Не успеешь — ставка сгорает."
+    )
+
+
+async def cashout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/cashout — забрать выигрыш по текущему множителю в игре Краш."""
+    tg_user = update.effective_user
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    ok, message, winnings, extra = crash_cash_out(tg_user.id)
+    if not ok:
+        await update.message.reply_text(f"⛔ {message}")
+        return
+
+    await update.message.reply_text(
+        f"💸 Выведено на x{extra['multiplier']}!\n"
+        f"Выигрыш: +{winnings} (ставка {extra['bet']})\n"
+        f"💰 Новый баланс: {extra['balance']}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 🌐 HTTP-API для мини-приложения (index.html)
 # ---------------------------------------------------------------------------
 # Мини-приложение больше не считает результаты игр само в браузере — оно
@@ -1009,8 +1256,8 @@ async def api_play(request):
         winnings = int(bet * multiplier)
         win_symbol = result_name.split()[0]
         reel_pool = [s[0].split()[0] for s in ROULETTE_SECTORS]
-        reels = three_reel_symbols(win_symbol, reel_pool)
-        payload = {"resultName": result_name, "multiplier": multiplier, "reels": reels}
+        reels, result_index = three_reel_symbols(win_symbol, reel_pool)
+        payload = {"resultName": result_name, "multiplier": multiplier, "reels": reels, "resultIndex": result_index}
 
     elif game == "dice":
         try:
@@ -1113,14 +1360,123 @@ async def api_promo(request):
     )
 
 
+async def api_crash_state(request):
+    """POST /api/crash/state — текущее состояние раунда краша: фаза,
+    множитель, история прошлых обрывов, и есть ли у пользователя ставка
+    в этом раунде. Не требует авторизации для самого раунда (он общий
+    для всех), но чтобы узнать личную ставку — нужен initData."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    snap = crash_snapshot()
+    my_bet = None
+    tg_user = _auth_telegram_user(body)
+    if tg_user:
+        entry = snap["bets_snapshot"].get(tg_user["id"])
+        if entry:
+            my_bet = {"bet": entry["bet"], "cashedOutAt": entry["cashed_out_at"]}
+
+    return web.json_response(
+        {
+            "phase": snap["phase"],
+            "roundId": snap["round_id"],
+            "multiplier": snap["multiplier"],
+            "waitRemaining": snap["wait_remaining"],
+            "crashPoint": snap["crash_point"],
+            "history": snap["history"],
+            "myBet": my_bet,
+        },
+        headers=_cors_headers(),
+    )
+
+
+async def api_crash_bet(request):
+    """POST /api/crash/bet — поставить в текущем (ожидающем) раунде краша."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    telegram_id = tg_user["id"]
+    user = get_or_create_user(telegram_id, tg_user.get("username") or "", tg_user.get("first_name") or "")
+    if user["banned"]:
+        return web.json_response(
+            {"error": "banned", "reason": user["ban_reason"] or "без указания причины"},
+            status=403,
+            headers=_cors_headers(),
+        )
+
+    try:
+        bet = int(body.get("bet"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "invalid_bet"}, status=400, headers=_cors_headers())
+    if bet <= 0:
+        return web.json_response({"error": "invalid_bet"}, status=400, headers=_cors_headers())
+    if bet > user["balance"]:
+        return web.json_response({"error": "insufficient_balance"}, status=400, headers=_cors_headers())
+
+    name = tg_user.get("first_name") or user["first_name"] or "Игрок"
+    ok, message = crash_place_bet(telegram_id, name, bet)
+    if not ok:
+        return web.json_response({"error": "bet_rejected", "message": message}, status=400, headers=_cors_headers())
+
+    updated = get_user(telegram_id)
+    return web.json_response(
+        {"success": True, "balance": updated["balance"], "games_played": updated["games_played"], "best_win": updated["best_win"]},
+        headers=_cors_headers(),
+    )
+
+
+async def api_crash_cashout(request):
+    """POST /api/crash/cashout — забрать выигрыш по текущему множителю,
+    пока раунд ещё не оборвался."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    ok, message, winnings, extra = crash_cash_out(tg_user["id"])
+    if not ok:
+        return web.json_response({"error": "cashout_rejected", "message": message}, status=400, headers=_cors_headers())
+
+    updated = get_user(tg_user["id"])
+    return web.json_response(
+        {
+            "success": True,
+            "winnings": winnings,
+            "multiplier": extra["multiplier"],
+            "balance": extra["balance"],
+            "best_win": extra["best_win"],
+            "games_played": updated["games_played"],
+        },
+        headers=_cors_headers(),
+    )
+
+
 def build_api_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/state", api_state)
     app.router.add_post("/api/play", api_play)
     app.router.add_post("/api/promo", api_promo)
+    app.router.add_post("/api/crash/state", api_crash_state)
+    app.router.add_post("/api/crash/bet", api_crash_bet)
+    app.router.add_post("/api/crash/cashout", api_crash_cashout)
     app.router.add_route("OPTIONS", "/api/state", _handle_options)
     app.router.add_route("OPTIONS", "/api/play", _handle_options)
     app.router.add_route("OPTIONS", "/api/promo", _handle_options)
+    app.router.add_route("OPTIONS", "/api/crash/state", _handle_options)
+    app.router.add_route("OPTIONS", "/api/crash/bet", _handle_options)
+    app.router.add_route("OPTIONS", "/api/crash/cashout", _handle_options)
     return app
 
 
@@ -1237,6 +1593,10 @@ async def ban_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Пользователь не найден.")
         return
 
+    if u["telegram_id"] == tg_user.id:
+        await update.message.reply_text("⛔ Нельзя забанить самого себя.")
+        return
+
     reason = " ".join(context.args[1:]) if len(context.args) > 1 else "не указана"
     set_ban(u["telegram_id"], True, reason)
 
@@ -1293,6 +1653,10 @@ async def warn_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     u = find_user(context.args[0])
     if not u:
         await update.message.reply_text("Пользователь не найден.")
+        return
+
+    if u["telegram_id"] == tg_user.id:
+        await update.message.reply_text("⛔ Нельзя выдать предупреждение самому себе.")
         return
 
     reason = " ".join(context.args[1:]) if len(context.args) > 1 else "не указана"
@@ -1485,6 +1849,9 @@ def main() -> None:
     api_thread = threading.Thread(target=run_api_server, daemon=True)
     api_thread.start()
 
+    crash_thread = threading.Thread(target=crash_scheduler, daemon=True)
+    crash_thread.start()
+
     builder = ApplicationBuilder().token(TOKEN).post_init(post_init)
     if PROXY_URL:
         builder = builder.proxy(PROXY_URL).get_updates_proxy(PROXY_URL)
@@ -1500,6 +1867,8 @@ def main() -> None:
     application.add_handler(CommandHandler("slots", slots))
     application.add_handler(CommandHandler("coinflip", coinflip))
     application.add_handler(CommandHandler("blackred", blackred))
+    application.add_handler(CommandHandler("crash", crash_cmd))
+    application.add_handler(CommandHandler("cashout", cashout_cmd))
     application.add_handler(CommandHandler("createpromo", create_promo))
     application.add_handler(CommandHandler("promo", promo))
     application.add_handler(CommandHandler("users", list_users))
