@@ -231,6 +231,13 @@
   .reel-cell.spinning { animation: pulse .3s ease infinite alternate; }
   @keyframes pulse { from { transform: scale(1); } to { transform: scale(.94); } }
 
+  /* Линия выплаты — только в рулетке центр всегда несёт настоящий
+     результат, поэтому подсвечиваем его тонкой рамкой независимо от
+     исхода, чтобы сразу было видно, куда смотреть. */
+  .reel.roulette-payline .reel-cell:nth-child(2) {
+    border-color: rgba(232,184,75,0.35);
+  }
+
   .single-stage {
     aspect-ratio: 2.4 / 1;
     background: var(--bg-1);
@@ -414,6 +421,56 @@
     color: var(--text-1);
   }
 
+  /* ---------- Мины: сетка 5x5 ---------- */
+  .mines-status-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: clamp(10px, 3vw, 16px);
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .mines-mult {
+    font-size: clamp(22px, 6vw, 30px);
+    font-weight: 800;
+    color: var(--gold);
+    font-variant-numeric: tabular-nums;
+  }
+  .mines-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: clamp(5px, 1.6vw, 8px);
+    margin-bottom: clamp(14px, 4vw, 20px);
+  }
+  .mines-tile {
+    aspect-ratio: 1 / 1;
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    border-radius: 9px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(16px, 5vw, 22px);
+    cursor: pointer;
+    transition: border-color .15s ease, transform .1s ease;
+    user-select: none;
+  }
+  .mines-tile:active { transform: scale(.93); }
+  .mines-tile.revealed {
+    border-color: var(--success);
+    box-shadow: 0 0 0 1px var(--success) inset;
+    cursor: default;
+  }
+  .mines-tile.mine {
+    border-color: var(--danger);
+    box-shadow: 0 0 0 1px var(--danger) inset;
+    cursor: default;
+  }
+  .mines-tile.hit {
+    border-color: var(--danger);
+    background: rgba(226,85,74,0.18);
+    cursor: default;
+  }
+  .mines-tile.locked { cursor: default; opacity: .85; }
+
   .footnote {
     text-align: center;
     color: var(--text-1);
@@ -505,6 +562,21 @@
     </div>
   </div>
 
+  <div id="minesPanel" style="display:none;">
+    <div class="mines-status-row">
+      <div class="mines-mult" id="minesMultLabel">×1.00</div>
+      <div class="crash-status" id="minesStatus">Выбери мины и ставку</div>
+    </div>
+    <div class="picker-row" id="minesCountRow"></div>
+    <div class="mines-grid" id="minesGrid"></div>
+    <div class="bet-row" id="minesBetRow"></div>
+    <button class="spin-btn" id="minesActionBtn">Начать игру</button>
+    <div class="result-msg" id="minesMsg"></div>
+    <div class="footnote" style="margin-top:14px;">
+      5×5 клеток, часть заминирована. Каждая безопасная клетка поднимает множитель — забери выигрыш, пока не поздно.
+    </div>
+  </div>
+
   <div class="paytable" id="paytable">
     <div class="section-title" style="margin-bottom:10px;">Таблица выигрышей</div>
   </div>
@@ -527,7 +599,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -553,7 +625,7 @@
   var SLOT_TRIPLE_MULT = { "🍋":3, "🍒":4, "🔔":6, "⭐":10, "💎":20, "7️⃣":50 };
   var SLOT_PAIR_MULT = 1.2;
   var DICE_WIN_MULT = 5.0;
-  var COINFLIP_WIN_MULT = 1.9;
+  var COINFLIP_WIN_MULT = 2.0;
   var BLACKRED_WIN_MULT = 2.0;
 
   var GAMES = {
@@ -562,9 +634,10 @@
     slots:    { title: "Слоты", pick: null },
     coinflip: { title: "Монетка", pick: "coin" },
     blackred: { title: "Чёрное/красное", pick: "color" },
-    crash:    { title: "Краш", pick: null, custom: true }
+    crash:    { title: "Краш", pick: null, custom: true },
+    mines:    { title: "Мины", pick: null, custom: true }
   };
-  var GAME_ORDER = ["roulette", "dice", "slots", "coinflip", "blackred", "crash"];
+  var GAME_ORDER = ["roulette", "dice", "slots", "coinflip", "blackred", "crash", "mines"];
 
   var state = {
     userId: "0000",
@@ -751,19 +824,28 @@
     renderTabs();
     document.getElementById("gameTitle").textContent = GAMES[state.game].title;
 
-    var isCrash = !!GAMES[state.game].custom;
+    var isCustom = !!GAMES[state.game].custom;
     var standardIds = ["stage", "pickerRow", "betRow", "spinBtn", "resultMsg", "paytable"];
     standardIds.forEach(function(id){
-      document.getElementById(id).style.display = isCrash ? "none" : "";
+      document.getElementById(id).style.display = isCustom ? "none" : "";
     });
-    document.getElementById("crashPanel").style.display = isCrash ? "" : "none";
+    document.getElementById("crashPanel").style.display = (state.game === "crash") ? "" : "none";
+    document.getElementById("minesPanel").style.display = (state.game === "mines") ? "" : "none";
 
-    if (isCrash) {
-      stopStandardForCrash();
+    if (state.game === "crash") {
+      state.spinning = false;
+      stopMinesPolling();
       startCrashPolling();
       return;
     }
+    if (state.game === "mines") {
+      state.spinning = false;
+      stopCrashPolling();
+      startMinesPolling();
+      return;
+    }
     stopCrashPolling();
+    stopMinesPolling();
 
     renderStageIdle();
     renderPicker();
@@ -773,10 +855,7 @@
     msg.textContent = "Выбери ставку и жми «Крутить»";
   }
 
-  function stopStandardForCrash(){
-    // На случай, если переключились на краш посреди анимации другой игры.
-    state.spinning = false;
-  }
+
 
   // ---------- Пикеры (число кости / орёл-решка / цвет) ----------
   function renderPicker(){
@@ -864,8 +943,9 @@
   function renderStageIdle(){
     var stage = document.getElementById("stage");
     if (state.game === "roulette" || state.game === "slots") {
+      var reelClass = "reel" + (state.game === "roulette" ? " roulette-payline" : "");
       stage.innerHTML =
-        '<div class="reel"><div class="reel-cell" id="cell0">🎲</div>' +
+        '<div class="' + reelClass + '"><div class="reel-cell" id="cell0">🎲</div>' +
         '<div class="reel-cell" id="cell1">🎲</div>' +
         '<div class="reel-cell" id="cell2">🎲</div></div>';
     } else if (state.game === "dice") {
@@ -925,10 +1005,9 @@
     return list[list.length-1];
   }
 
-  // Возвращает { reels: [3 символа], index: индекс настоящего результата }.
-  // Один из символов — реальный результат (winSymbol), два других —
-  // случайные, но разные между собой символы из того же набора
-  // (например 💎 🍒 💥 вместо трёх одинаковых).
+  // Возвращает { reels: [3 символа], index: индекс настоящего результата
+  // — всегда 1, т.е. по центру }. По бокам — случайные, но разные между
+  // собой символы из того же набора (например 💎 🍒 💥).
   function threeReelSymbols(winSymbol){
     var pool = ROULETTE_SECTORS.map(function(s){ return s.symbol; });
     var others = pool.filter(function(s){ return s !== winSymbol; });
@@ -936,13 +1015,9 @@
       var j = Math.floor(Math.random() * (i + 1));
       var tmp = others[i]; others[i] = others[j]; others[j] = tmp;
     }
-    var picks = [winSymbol].concat(others.slice(0, 2));
-    while (picks.length < 3) picks.push(winSymbol);
-    for (var k = picks.length - 1; k > 0; k--) {
-      var m = Math.floor(Math.random() * (k + 1));
-      var t2 = picks[k]; picks[k] = picks[m]; picks[m] = t2;
-    }
-    return { reels: picks, index: picks.indexOf(winSymbol) };
+    var left = others.length > 0 ? others[0] : winSymbol;
+    var right = others.length > 1 ? others[1] : winSymbol;
+    return { reels: [left, winSymbol, right], index: 1 };
   }
 
   function localPlay(game, bet){
@@ -1378,6 +1453,236 @@
     }
   }
 
+  // ---------- Мины: сетка 5x5 ----------
+  var MINES_OPTIONS = [3, 5, 8];
+  var minesUI = {
+    bet: BET_OPTIONS[0],
+    customBetActive: false,
+    minesCount: MINES_OPTIONS[0],
+    active: false,
+    revealed: []
+  };
+
+  function renderMinesCountRow(){
+    var row = document.getElementById("minesCountRow");
+    row.innerHTML = "";
+    MINES_OPTIONS.forEach(function(v){
+      var el = document.createElement("div");
+      el.className = "pick" + (v === minesUI.minesCount ? " active" : "");
+      el.textContent = v + " мин";
+      el.onclick = function(){
+        if (minesUI.active) return;
+        minesUI.minesCount = v;
+        renderMinesCountRow();
+      };
+      row.appendChild(el);
+    });
+  }
+
+  function renderMinesBetRow(){
+    var row = document.getElementById("minesBetRow");
+    row.innerHTML = "";
+    BET_OPTIONS.forEach(function(v){
+      var chip = document.createElement("div");
+      chip.className = "chip" + (v === minesUI.bet && !minesUI.customBetActive ? " active" : "");
+      chip.textContent = v;
+      chip.onclick = function(){
+        if (minesUI.active) return;
+        minesUI.bet = v;
+        minesUI.customBetActive = false;
+        renderMinesBetRow();
+      };
+      row.appendChild(chip);
+    });
+    row.appendChild(buildCustomBetInput(
+      minesUI.customBetActive ? minesUI.bet : "",
+      function(val){
+        minesUI.bet = val;
+        minesUI.customBetActive = true;
+        clearChipActive(row);
+      },
+      function(){ return minesUI.active; }
+    ));
+  }
+
+  function renderMinesGrid(revealed, mines, hitIndex, disabled){
+    var grid = document.getElementById("minesGrid");
+    grid.innerHTML = "";
+    var revealedSet = {};
+    (revealed || []).forEach(function(i){ revealedSet[i] = true; });
+    var minesSet = {};
+    (mines || []).forEach(function(i){ minesSet[i] = true; });
+
+    for (var i = 0; i < 25; i++){
+      (function(i){
+        var tile = document.createElement("div");
+        tile.className = "mines-tile";
+        if (i === hitIndex) {
+          tile.classList.add("hit");
+          tile.textContent = "💥";
+        } else if (disabled && minesSet[i]) {
+          tile.classList.add("mine");
+          tile.textContent = "💣";
+        } else if (revealedSet[i]) {
+          tile.classList.add("revealed");
+          tile.textContent = "✅";
+        } else {
+          tile.textContent = "";
+        }
+        if (disabled || revealedSet[i]) {
+          tile.classList.add("locked");
+        } else {
+          tile.onclick = function(){ minesRevealTile(i); };
+        }
+        grid.appendChild(tile);
+      })(i);
+    }
+  }
+
+  function minesSetIdleUI(){
+    minesUI.active = false;
+    minesUI.revealed = [];
+    document.getElementById("minesMultLabel").textContent = "×1.00";
+    document.getElementById("minesStatus").textContent = "Выбери мины и ставку";
+    document.getElementById("minesActionBtn").textContent = "Начать игру";
+    document.getElementById("minesActionBtn").disabled = false;
+    renderMinesGrid([], [], null, false);
+    renderMinesCountRow();
+    renderMinesBetRow();
+  }
+
+  function startMinesPolling(){
+    if (!canUseApi()) {
+      document.getElementById("minesStatus").textContent = "Мины работают только при открытии через бота";
+      document.getElementById("minesActionBtn").disabled = true;
+      renderMinesGrid([], [], null, true);
+      return;
+    }
+    apiCall("/api/mines/state", {}, function(err, data){
+      if (err || !data) { minesSetIdleUI(); return; }
+      var session = data.session;
+      if (session && session.active) {
+        minesUI.active = true;
+        minesUI.bet = session.bet;
+        minesUI.minesCount = session.minesCount;
+        minesUI.revealed = session.revealed || [];
+        document.getElementById("minesMultLabel").textContent = "×" + session.multiplier.toFixed(2);
+        document.getElementById("minesStatus").textContent = "Игра идёт — жми на клетки или забирай выигрыш";
+        document.getElementById("minesActionBtn").textContent = "Забрать ×" + session.multiplier.toFixed(2);
+        document.getElementById("minesActionBtn").disabled = false;
+        renderMinesGrid(minesUI.revealed, [], null, false);
+        renderMinesCountRow();
+        renderMinesBetRow();
+      } else {
+        minesSetIdleUI();
+      }
+    });
+  }
+
+  function stopMinesPolling(){
+    // У мин нет "живого" таймера — состояние обновляется по действиям
+    // игрока, поэтому просто ничего не делаем при уходе с вкладки.
+  }
+
+  function minesStartGame(){
+    if (!canUseApi()) return;
+    var btn = document.getElementById("minesActionBtn");
+    var msg = document.getElementById("minesMsg");
+    btn.disabled = true;
+    apiCall("/api/mines/start", { bet: minesUI.bet, minesCount: minesUI.minesCount }, function(err, data){
+      if (err || !data || !data.success) {
+        msg.className = "result-msg lose";
+        msg.textContent = (data && data.message) ? data.message : "Не удалось начать игру";
+        btn.disabled = false;
+        return;
+      }
+      msg.className = "result-msg";
+      msg.textContent = "";
+      applyBalance(data.balance, data.games_played, data.best_win, true);
+      minesUI.active = true;
+      minesUI.revealed = [];
+      document.getElementById("minesMultLabel").textContent = "×1.00";
+      document.getElementById("minesStatus").textContent = "Игра идёт — жми на клетки или забирай выигрыш";
+      btn.textContent = "Заберите после первой клетки";
+      btn.disabled = true;
+      renderMinesGrid([], [], null, false);
+    });
+  }
+
+  function minesRevealTile(index){
+    if (!minesUI.active || !canUseApi()) return;
+    var msg = document.getElementById("minesMsg");
+    apiCall("/api/mines/reveal", { index: index }, function(err, data){
+      if (err || !data || data.error) {
+        msg.className = "result-msg lose";
+        msg.textContent = (data && data.message) ? data.message : "Не удалось открыть клетку";
+        return;
+      }
+      if (data.kind === "hit") {
+        minesUI.revealed.push(index);
+        renderMinesGrid(minesUI.revealed, data.minePositions, index, true);
+        document.getElementById("minesStatus").textContent = "💥 Бум! Ставка сгорела.";
+        document.getElementById("minesActionBtn").textContent = "Начать игру";
+        document.getElementById("minesActionBtn").disabled = false;
+        msg.className = "result-msg lose";
+        msg.textContent = "Тут была мина — ставка потеряна.";
+        applyBalance(data.balance, data.games_played, data.best_win, true);
+        minesUI.active = false;
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+      } else if (data.kind === "cleared") {
+        minesUI.revealed.push(index);
+        renderMinesGrid(minesUI.revealed, data.minePositions, null, true);
+        document.getElementById("minesStatus").textContent = "🏆 Все безопасные клетки открыты!";
+        document.getElementById("minesActionBtn").textContent = "Начать игру";
+        document.getElementById("minesActionBtn").disabled = false;
+        msg.className = "result-msg win";
+        msg.textContent = "Выигрыш ×" + data.multiplier.toFixed(2) + ": +" + data.winnings;
+        applyBalance(data.balance, data.games_played, data.best_win, true);
+        minesUI.active = false;
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+      } else {
+        minesUI.revealed.push(index);
+        renderMinesGrid(minesUI.revealed, [], null, false);
+        document.getElementById("minesMultLabel").textContent = "×" + data.multiplier.toFixed(2);
+        document.getElementById("minesActionBtn").textContent = "Забрать ×" + data.multiplier.toFixed(2);
+        document.getElementById("minesActionBtn").disabled = false;
+      }
+    });
+  }
+
+  function minesCashOut(){
+    if (!minesUI.active || !canUseApi()) return;
+    var msg = document.getElementById("minesMsg");
+    var btn = document.getElementById("minesActionBtn");
+    btn.disabled = true;
+    apiCall("/api/mines/cashout", {}, function(err, data){
+      if (err || !data || !data.success) {
+        msg.className = "result-msg lose";
+        msg.textContent = (data && data.message) ? data.message : "Не удалось вывести";
+        btn.disabled = false;
+        return;
+      }
+      renderMinesGrid(minesUI.revealed, data.minePositions, null, true);
+      document.getElementById("minesStatus").textContent = "💸 Выведено!";
+      btn.textContent = "Начать игру";
+      btn.disabled = false;
+      msg.className = "result-msg win";
+      msg.textContent = "Выигрыш ×" + data.multiplier.toFixed(2) + ": +" + data.winnings;
+      applyBalance(data.balance, data.games_played, data.best_win, true);
+      minesUI.active = false;
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+    });
+  }
+
+  function minesActionClick(){
+    if (minesUI.active) {
+      if (minesUI.revealed.length === 0) return; // нужно открыть хотя бы одну клетку
+      minesCashOut();
+    } else {
+      minesStartGame();
+    }
+  }
+
   // ---------- Инициализация ----------
   initUser();
   renderTabs();
@@ -1386,9 +1691,13 @@
   renderPicker();
   renderPaytable();
   renderCrashBetRow();
+  renderMinesCountRow();
+  renderMinesBetRow();
+  renderMinesGrid([], [], null, false);
   document.getElementById("spinBtn").addEventListener("click", play);
   document.getElementById("promoBtn").addEventListener("click", redeemPromo);
   document.getElementById("crashActionBtn").addEventListener("click", crashActionClick);
+  document.getElementById("minesActionBtn").addEventListener("click", minesActionClick);
 
   loadState(function(){
     renderBalance(false);

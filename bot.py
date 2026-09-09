@@ -1,5 +1,5 @@
 """
-
+Telegram-бот: профили пользователей + мини-игры казино (виртуальная валюта) + анимации.
 
 ВАЖНО:
 - Это ИГРОВАЯ механика с виртуальными очками, НЕ имеющими денежной стоимости
@@ -15,6 +15,7 @@
 - 🪙 Монетка       /coinflip [ставка] [орёл|решка]
 - 🔴⚫ Чёрное/красное /blackred [ставка] [красное|чёрное]
 - 🚀 Краш           /crash [ставка] затем /cashout — общий раунд с мини-приложением
+- 💣 Мины           /mines [ставка] [3|5|8] — сетка 5×5, забирай выигрыш вовремя
 
 Прочее:
 - /start   — создание профиля (уникальный ID) + анимация загрузки
@@ -110,7 +111,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -145,7 +146,7 @@ SLOT_TRIPLE_MULTIPLIER = {
 SLOT_PAIR_MULTIPLIER = 1.2
 
 # --- Монетка: 50/50 ---
-COINFLIP_WIN_MULTIPLIER = 1.9
+COINFLIP_WIN_MULTIPLIER = 2.0
 
 # --- Чёрное/красное: классическая рулеточная раскладка (европейская, зеро одно) ---
 # 18 красных + 18 чёрных + 1 зелёное зеро = 37 секторов.
@@ -214,7 +215,7 @@ crash_state = {
 }
 
 
-def finalize_crash_payout(telegram_id: int, winnings: int):
+def finalize_round_payout(telegram_id: int, winnings: int):
     """Начисляет выигрыш (0, если проиграл — ставка уже списана в момент
     входа в раунд) и обновляет статистику игр/рекорд, как settle()."""
     with closing(sqlite3.connect(DB_PATH)) as conn:
@@ -280,7 +281,7 @@ def crash_cash_out(telegram_id: int):
         entry["cashed_out_at"] = mult
         bet = entry["bet"]
     winnings = int(bet * mult)
-    new_balance, best_win = finalize_crash_payout(telegram_id, winnings)
+    new_balance, best_win = finalize_round_payout(telegram_id, winnings)
     return True, "Выведено.", winnings, {"multiplier": mult, "balance": new_balance, "best_win": best_win, "bet": bet}
 
 
@@ -292,7 +293,7 @@ def _crash_settle_round_losses():
         bets = dict(crash_state["bets"])
     for telegram_id, entry in bets.items():
         if entry["cashed_out_at"] is None:
-            finalize_crash_payout(telegram_id, 0)
+            finalize_round_payout(telegram_id, 0)
 
 
 def crash_scheduler() -> None:
@@ -327,6 +328,147 @@ def crash_scheduler() -> None:
         except Exception:
             logger.exception("Ошибка в планировщике краша, продолжаем через секунду")
             time.sleep(1)
+
+
+# ---------------------------------------------------------------------------
+# 💣 Мины: сетка 5×5, часть клеток заминирована. За каждую безопасную
+# клетку множитель растёт (честный расчёт по гипергеометрическому
+# распределению — как обычно считают такие игры), в любой момент можно
+# забрать выигрыш. Попал на мину — теряешь ставку. Игра ведётся в памяти
+# по каждому пользователю отдельно (в отличие от краша, здесь нет общего
+# раунда — своя игра у каждого).
+# ---------------------------------------------------------------------------
+
+MINES_GRID_SIZE = 25
+MINES_HOUSE_EDGE = 0.97  # небольшой перевес казино, как в других играх
+MINES_OPTIONS = [3, 5, 8]  # доступное количество мин на выбор игрока
+
+mines_lock = threading.Lock()
+mines_sessions = {}  # telegram_id -> {"bet","mines_count","mine_positions","revealed","active"}
+
+
+def mines_multiplier(total: int, mines: int, reveals: int) -> float:
+    """Честный (без перевеса) множитель для reveals открытых безопасных
+    клеток — произведение гипергеометрических шансов — умноженный на
+    небольшой домашний edge, как в остальных играх."""
+    safe = total - mines
+    mult = 1.0
+    for i in range(reveals):
+        mult *= (total - i) / (safe - i)
+    return round(mult * MINES_HOUSE_EDGE, 2)
+
+
+def mines_start(telegram_id: int, bet: int, mines_count: int):
+    if mines_count not in MINES_OPTIONS:
+        mines_count = MINES_OPTIONS[0]
+    with mines_lock:
+        existing = mines_sessions.get(telegram_id)
+        if existing and existing["active"]:
+            return False, "У тебя уже есть активная игра в Мины — заверши её, прежде чем начать новую."
+        mine_positions = set(random.sample(range(MINES_GRID_SIZE), mines_count))
+        mines_sessions[telegram_id] = {
+            "bet": bet,
+            "mines_count": mines_count,
+            "mine_positions": mine_positions,
+            "revealed": set(),
+            "active": True,
+        }
+    update_balance(telegram_id, -bet)
+    return True, "Игра началась."
+
+
+def mines_reveal(telegram_id: int, index: int):
+    with mines_lock:
+        session = mines_sessions.get(telegram_id)
+        if not session or not session["active"]:
+            return False, "Нет активной игры в Мины.", None
+        if not (0 <= index < MINES_GRID_SIZE):
+            return False, "Некорректная клетка.", None
+        if index in session["revealed"]:
+            return False, "Эта клетка уже открыта.", None
+
+        session["revealed"].add(index)
+        hit_mine = index in session["mine_positions"]
+        bet = session["bet"]
+        mines_count = session["mines_count"]
+        mine_positions = sorted(session["mine_positions"]) if hit_mine else None
+        auto_clear = False
+        mult = None
+
+        if hit_mine:
+            session["active"] = False
+        else:
+            safe_total = MINES_GRID_SIZE - mines_count
+            revealed_count = len(session["revealed"])
+            mult = mines_multiplier(MINES_GRID_SIZE, mines_count, revealed_count)
+            if revealed_count >= safe_total:
+                auto_clear = True
+                session["active"] = False
+
+    if hit_mine:
+        _, best_win = finalize_round_payout(telegram_id, 0)
+        updated = get_user(telegram_id)
+        return True, "hit", {
+            "hit": True,
+            "minePositions": mine_positions,
+            "balance": updated["balance"],
+            "games_played": updated["games_played"],
+            "best_win": updated["best_win"],
+        }
+
+    if auto_clear:
+        winnings = int(bet * mult)
+        new_balance, best_win = finalize_round_payout(telegram_id, winnings)
+        return True, "cleared", {
+            "hit": False,
+            "cleared": True,
+            "multiplier": mult,
+            "winnings": winnings,
+            "balance": new_balance,
+            "best_win": best_win,
+        }
+
+    return True, "safe", {"hit": False, "cleared": False, "multiplier": mult}
+
+
+def mines_cash_out(telegram_id: int):
+    with mines_lock:
+        session = mines_sessions.get(telegram_id)
+        if not session or not session["active"]:
+            return False, "Нет активной игры в Мины.", None
+        if not session["revealed"]:
+            return False, "Сначала открой хотя бы одну клетку.", None
+        bet = session["bet"]
+        mult = mines_multiplier(MINES_GRID_SIZE, session["mines_count"], len(session["revealed"]))
+        mine_positions = sorted(session["mine_positions"])
+        session["active"] = False
+
+    winnings = int(bet * mult)
+    new_balance, best_win = finalize_round_payout(telegram_id, winnings)
+    return True, "Выведено.", {
+        "multiplier": mult,
+        "winnings": winnings,
+        "minePositions": mine_positions,
+        "balance": new_balance,
+        "best_win": best_win,
+    }
+
+
+def mines_get_state(telegram_id: int):
+    with mines_lock:
+        session = mines_sessions.get(telegram_id)
+        if not session:
+            return None
+        revealed_count = len(session["revealed"])
+        mult = mines_multiplier(MINES_GRID_SIZE, session["mines_count"], revealed_count) if revealed_count else 1.0
+        return {
+            "active": session["active"],
+            "bet": session["bet"],
+            "minesCount": session["mines_count"],
+            "revealed": sorted(session["revealed"]),
+            "multiplier": mult,
+        }
+
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -745,7 +887,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🎯 /slots [ставка] — три барабана, совпадения дают выигрыш\n"
         f"🪙 /coinflip [ставка] [орёл|решка] — выигрыш x{COINFLIP_WIN_MULTIPLIER}\n"
         f"🔴⚫ /blackred [ставка] [красное|чёрное] — выигрыш x{BLACKRED_WIN_MULTIPLIER}\n"
-        f"🚀 /crash [ставка], затем /cashout — множитель растёт, успей вывести до обрыва (макс. x{CRASH_MAX_MULTIPLIER:.0f})\n\n"
+        f"🚀 /crash [ставка], затем /cashout — множитель растёт, успей вывести до обрыва (макс. x{CRASH_MAX_MULTIPLIER:.0f})\n"
+        f"💣 /mines [ставка] [3|5|8] — сетка 5×5, открывай клетки и забирай выигрыш вовремя\n\n"
         "🎟️ /promo КОД — активировать промокод\n"
         "📩 /support текст — написать в поддержку (ответят прямо тут)\n\n"
         "ℹ️ Валюта в боте виртуальная, не имеет денежной ценности.\n"
@@ -777,19 +920,16 @@ def spin_roulette():
 
 def three_reel_symbols(win_symbol: str, pool: list):
     """Возвращает (список из 3 символов для барабана, индекс настоящего
-    результата в этом списке). Один символ — реальный итог (win_symbol),
-    остальные два — случайные, но разные между собой символы из того же
-    набора (для наглядности вроде «алмаз, вишня, мимо» вместо трёх
-    одинаковых). Индекс нужен, чтобы подсвечивать золотой/красной рамкой
-    именно настоящий результат, а не все 3 ячейки сразу — иначе казалось
-    бы, что выиграли все символы разом, даже декоративные."""
+    результата — теперь всегда 1, т.е. по центру). По бокам — случайные,
+    но разные между собой символы из того же набора (для наглядности
+    вроде «алмаз, вишня, мимо» вместо трёх одинаковых). Настоящий
+    результат всегда в середине, как в классической рулетке/слоте, где
+    смотрят именно на центральную линию."""
     others_pool = [s for s in pool if s != win_symbol]
     random.shuffle(others_pool)
-    picks = [win_symbol] + others_pool[:2]
-    while len(picks) < 3:
-        picks.append(win_symbol)
-    random.shuffle(picks)
-    return picks, picks.index(win_symbol)
+    left = others_pool[0] if len(others_pool) > 0 else win_symbol
+    right = others_pool[1] if len(others_pool) > 1 else win_symbol
+    return [left, win_symbol, right], 1
 
 
 async def roulette(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1121,6 +1261,67 @@ async def cashout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"💸 Выведено на x{extra['multiplier']}!\n"
         f"Выигрыш: +{winnings} (ставка {extra['bet']})\n"
         f"💰 Новый баланс: {extra['balance']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 💣 Мины — игровое поле через inline-кнопки прямо в чате
+# ---------------------------------------------------------------------------
+
+def build_mines_keyboard(revealed, mines=None, hit_index=None, disabled=False):
+    mines_set = set(mines or [])
+    revealed_set = set(revealed or [])
+    rows = []
+    for r in range(5):
+        row = []
+        for c in range(5):
+            idx = r * 5 + c
+            if idx == hit_index:
+                label = "💥"
+            elif disabled and idx in mines_set:
+                label = "💣"
+            elif idx in revealed_set:
+                label = "✅"
+            else:
+                label = "⬜"
+            cb = "mnoop" if (disabled or idx in revealed_set) else f"mn:{idx}"
+            row.append(InlineKeyboardButton(label, callback_data=cb))
+        rows.append(row)
+    if not disabled:
+        rows.append([InlineKeyboardButton("💰 Забрать", callback_data="mncashout")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def mines_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/mines СТАВКА [мин: 3|5|8] — начать игру в Мины прямо в чате."""
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    bet = parse_bet(context)
+    if not await check_bet(update, user, bet):
+        return
+
+    mines_count = MINES_OPTIONS[0]
+    if len(context.args) > 1:
+        try:
+            requested = int(context.args[1])
+            if requested in MINES_OPTIONS:
+                mines_count = requested
+        except ValueError:
+            pass
+
+    ok, message = mines_start(tg_user.id, bet, mines_count)
+    if not ok:
+        await update.message.reply_text(f"⛔ {message}")
+        return
+
+    await update.message.reply_text(
+        f"💣 Мины — ставка {bet}, мин на поле: {mines_count} из {MINES_GRID_SIZE}\n"
+        f"Открывай безопасные клетки — множитель растёт с каждой. "
+        f"В любой момент жми «💰 Забрать», чтобы не рисковать дальше.",
+        reply_markup=build_mines_keyboard(revealed=[]),
     )
 
 
@@ -1476,6 +1677,104 @@ async def api_crash_cashout(request):
     )
 
 
+async def api_mines_state(request):
+    """POST /api/mines/state — текущая активная игра в Мины (если есть)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    snap = mines_get_state(tg_user["id"])
+    return web.json_response({"session": snap}, headers=_cors_headers())
+
+
+async def api_mines_start(request):
+    """POST /api/mines/start — начать новую игру в Мины."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    telegram_id = tg_user["id"]
+    user = get_or_create_user(telegram_id, tg_user.get("username") or "", tg_user.get("first_name") or "")
+    if user["banned"]:
+        return web.json_response(
+            {"error": "banned", "reason": user["ban_reason"] or "без указания причины"},
+            status=403, headers=_cors_headers(),
+        )
+
+    try:
+        bet = int(body.get("bet"))
+        mines_count = int(body.get("minesCount"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "invalid_input"}, status=400, headers=_cors_headers())
+    if bet <= 0:
+        return web.json_response({"error": "invalid_bet"}, status=400, headers=_cors_headers())
+    if bet > user["balance"]:
+        return web.json_response({"error": "insufficient_balance"}, status=400, headers=_cors_headers())
+
+    ok, message = mines_start(telegram_id, bet, mines_count)
+    if not ok:
+        return web.json_response({"error": "start_rejected", "message": message}, status=400, headers=_cors_headers())
+
+    updated = get_user(telegram_id)
+    return web.json_response(
+        {"success": True, "balance": updated["balance"], "games_played": updated["games_played"], "best_win": updated["best_win"]},
+        headers=_cors_headers(),
+    )
+
+
+async def api_mines_reveal(request):
+    """POST /api/mines/reveal — открыть клетку {initData, index}."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    try:
+        index = int(body.get("index"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "invalid_index"}, status=400, headers=_cors_headers())
+
+    ok, kind, data = mines_reveal(tg_user["id"], index)
+    if not ok:
+        return web.json_response({"error": "reveal_rejected", "message": kind}, status=400, headers=_cors_headers())
+
+    data["kind"] = kind
+    return web.json_response(data, headers=_cors_headers())
+
+
+async def api_mines_cashout(request):
+    """POST /api/mines/cashout — забрать текущий выигрыш в Минах."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    ok, message, data = mines_cash_out(tg_user["id"])
+    if not ok:
+        return web.json_response({"error": "cashout_rejected", "message": message}, status=400, headers=_cors_headers())
+
+    data["success"] = True
+    return web.json_response(data, headers=_cors_headers())
+
+
 def build_api_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/state", api_state)
@@ -1484,12 +1783,20 @@ def build_api_app() -> web.Application:
     app.router.add_post("/api/crash/state", api_crash_state)
     app.router.add_post("/api/crash/bet", api_crash_bet)
     app.router.add_post("/api/crash/cashout", api_crash_cashout)
+    app.router.add_post("/api/mines/state", api_mines_state)
+    app.router.add_post("/api/mines/start", api_mines_start)
+    app.router.add_post("/api/mines/reveal", api_mines_reveal)
+    app.router.add_post("/api/mines/cashout", api_mines_cashout)
     app.router.add_route("OPTIONS", "/api/state", _handle_options)
     app.router.add_route("OPTIONS", "/api/play", _handle_options)
     app.router.add_route("OPTIONS", "/api/promo", _handle_options)
     app.router.add_route("OPTIONS", "/api/crash/state", _handle_options)
     app.router.add_route("OPTIONS", "/api/crash/bet", _handle_options)
     app.router.add_route("OPTIONS", "/api/crash/cashout", _handle_options)
+    app.router.add_route("OPTIONS", "/api/mines/state", _handle_options)
+    app.router.add_route("OPTIONS", "/api/mines/start", _handle_options)
+    app.router.add_route("OPTIONS", "/api/mines/reveal", _handle_options)
+    app.router.add_route("OPTIONS", "/api/mines/cashout", _handle_options)
     return app
 
 
@@ -1947,6 +2254,52 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text(f"🪙 /coinflip {DEFAULT_BET} орёл — ставка {DEFAULT_BET} на орла.")
     elif query.data == "how_blackred":
         await query.message.reply_text(f"🔴⚫ /blackred {DEFAULT_BET} красное — ставка {DEFAULT_BET} на красное.")
+    elif query.data == "mnoop":
+        await query.answer()
+    elif query.data.startswith("mn:"):
+        idx = int(query.data.split(":", 1)[1])
+        ok, kind, data = mines_reveal(query.from_user.id, idx)
+        if not ok:
+            await query.answer(kind, show_alert=True)
+            return
+        snap = mines_get_state(query.from_user.id)
+        revealed = snap["revealed"] if snap else [idx]
+
+        if kind == "hit":
+            kb = build_mines_keyboard(revealed=revealed, mines=data["minePositions"], hit_index=idx, disabled=True)
+            await query.edit_message_text(
+                f"💥 Бум! Тут была мина — ставка сгорела.\n💰 Баланс: {data['balance']}",
+                reply_markup=kb,
+            )
+        elif kind == "cleared":
+            kb = build_mines_keyboard(revealed=revealed, mines=data["minePositions"], disabled=True)
+            await query.edit_message_text(
+                f"🏆 Все безопасные клетки открыты!\n"
+                f"Множитель ×{data['multiplier']}, выигрыш +{data['winnings']}\n"
+                f"💰 Баланс: {data['balance']}",
+                reply_markup=kb,
+            )
+        else:
+            kb = build_mines_keyboard(revealed=revealed)
+            await query.edit_message_text(
+                f"💣 Мины — множитель ×{data['multiplier']}\n"
+                f"Открыто клеток: {len(revealed)}. Жми ещё или забирай выигрыш.",
+                reply_markup=kb,
+            )
+    elif query.data == "mncashout":
+        ok, message, data = mines_cash_out(query.from_user.id)
+        if not ok:
+            await query.answer(message, show_alert=True)
+            return
+        snap = mines_get_state(query.from_user.id)
+        revealed = snap["revealed"] if snap else []
+        kb = build_mines_keyboard(revealed=revealed, mines=data["minePositions"], disabled=True)
+        await query.edit_message_text(
+            f"💸 Забрано на ×{data['multiplier']}!\n"
+            f"Выигрыш: +{data['winnings']}\n"
+            f"💰 Баланс: {data['balance']}",
+            reply_markup=kb,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2009,6 +2362,7 @@ def main() -> None:
     application.add_handler(CommandHandler("blackred", blackred))
     application.add_handler(CommandHandler("crash", crash_cmd))
     application.add_handler(CommandHandler("cashout", cashout_cmd))
+    application.add_handler(CommandHandler("mines", mines_cmd))
     application.add_handler(CommandHandler("createpromo", create_promo))
     application.add_handler(CommandHandler("promo", promo))
     application.add_handler(CommandHandler("users", list_users))
