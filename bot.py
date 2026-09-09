@@ -34,7 +34,7 @@ index.html обращается туда за балансом и результ
 с nginx) и указать этот адрес в константе API_BASE_URL внутри index.html.
 
 Установка зависимостей:
-    pip install -r requirements.txt
+    
 
 Запуск (Windows / PowerShell):
     $env:BOT_TOKEN="твой_токен_от_BotFather"
@@ -42,7 +42,7 @@ index.html обращается туда за балансом и результ
 
 Запуск (Linux / macOS):
     export BOT_TOKEN="твой_токен_от_BotFather"
-    python bot.py
+    
 """
 
 import asyncio
