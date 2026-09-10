@@ -6,7 +6,6 @@
 <title>Roulette Club</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  
   :root{
     --bg-0:#0b0e14;
     --bg-1:#131826;
@@ -39,6 +38,14 @@
     padding: var(--pad);
     padding-bottom: calc(var(--pad) + env(safe-area-inset-bottom, 0px));
     padding-top: calc(var(--pad) + env(safe-area-inset-top, 0px));
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  #app.revealed {
+    animation: appReveal .5s ease forwards;
+  }
+  @keyframes appReveal {
+    to { opacity: 1; transform: translateY(0); }
   }
 
   /* ---------- Loading screen ---------- */
@@ -150,9 +157,11 @@
     font-weight: 700;
     color: var(--gold);
     font-variant-numeric: tabular-nums;
-    transition: transform .15s ease;
+    transition: transform .18s cubic-bezier(.34,1.56,.64,1), color .3s ease, text-shadow .3s ease;
   }
-  .balance-value.bump { transform: scale(1.08); }
+  .balance-value.bump { transform: scale(1.1); }
+  .balance-value.bump-win { color: var(--success); text-shadow: 0 0 18px rgba(75,191,138,0.55); }
+  .balance-value.bump-lose { color: var(--danger); text-shadow: 0 0 18px rgba(226,85,74,0.45); }
 
   .stats-grid {
     display: grid;
@@ -191,7 +200,9 @@
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
+    transition: background .18s ease, border-color .18s ease, color .18s ease, transform .1s ease;
   }
+  .tab-btn:active { transform: scale(.95); }
   .tab-btn.active {
     background: rgba(232,184,75,0.12);
     border-color: var(--gold);
@@ -219,18 +230,37 @@
     border-radius: 12px;
     display: flex; align-items: center; justify-content: center;
     font-size: clamp(28px, 9vw, 44px);
-    transition: transform .12s ease, border-color .2s ease;
+    transition: transform .12s ease, border-color .2s ease, box-shadow .2s ease;
   }
   .reel-cell.win {
     border-color: var(--gold);
-    box-shadow: 0 0 0 1px var(--gold) inset;
+    box-shadow: 0 0 0 1px var(--gold) inset, 0 0 16px rgba(232,184,75,0.45);
+    animation: winGlow 1s ease-in-out 2;
   }
   .reel-cell.lose-outline {
     border-color: var(--text-1);
     box-shadow: 0 0 0 1px var(--text-1) inset;
   }
-  .reel-cell.spinning { animation: pulse .3s ease infinite alternate; }
-  @keyframes pulse { from { transform: scale(1); } to { transform: scale(.94); } }
+  .reel-cell.spinning {
+    animation: reelSpin .22s linear infinite;
+    filter: blur(1px);
+  }
+  .reel-cell.settle { animation: reelSettle .38s cubic-bezier(.22,1.6,.4,1); }
+  @keyframes reelSpin {
+    0% { transform: translateY(0) scaleY(1); opacity: 1; }
+    45% { transform: translateY(-6px) scaleY(.88); opacity: .55; }
+    55% { transform: translateY(6px) scaleY(.88); opacity: .55; }
+    100% { transform: translateY(0) scaleY(1); opacity: 1; }
+  }
+  @keyframes reelSettle {
+    0% { transform: translateY(-14px) scale(.85); opacity: 0; }
+    60% { transform: translateY(3px) scale(1.06); opacity: 1; }
+    100% { transform: translateY(0) scale(1); }
+  }
+  @keyframes winGlow {
+    0%, 100% { box-shadow: 0 0 0 1px var(--gold) inset, 0 0 10px rgba(232,184,75,0.35); }
+    50% { box-shadow: 0 0 0 1px var(--gold) inset, 0 0 26px rgba(232,184,75,0.75); }
+  }
 
   /* Линия выплаты — только в рулетке центр всегда несёт настоящий
      результат, поэтому подсвечиваем его тонкой рамкой независимо от
@@ -247,10 +277,15 @@
     display: flex; align-items: center; justify-content: center;
     font-size: clamp(40px, 14vw, 68px);
     margin-bottom: clamp(16px, 4.5vw, 22px);
-    transition: border-color .2s ease;
+    transition: border-color .2s ease, box-shadow .2s ease;
   }
-  .single-stage.win { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold) inset; }
-  .single-stage.spinning { animation: pulse .3s ease infinite alternate; }
+  .single-stage.win {
+    border-color: var(--gold);
+    box-shadow: 0 0 0 1px var(--gold) inset, 0 0 18px rgba(232,184,75,0.4);
+    animation: winGlow 1s ease-in-out 2;
+  }
+  .single-stage.spinning { animation: reelSpin .22s linear infinite; filter: blur(1px); }
+  .single-stage.settle { animation: reelSettle .38s cubic-bezier(.22,1.6,.4,1); }
 
   /* ---------- Picker rows (dice number / coin side / color) ---------- */
   .picker-row {
@@ -357,6 +392,17 @@
   }
   .result-msg.win { color: var(--success); font-weight: 600; }
   .result-msg.lose { color: var(--danger); font-weight: 600; }
+  .result-msg.pop { animation: msgPop .32s cubic-bezier(.25,1.4,.4,1); }
+  @keyframes msgPop {
+    0% { opacity: 0; transform: translateY(6px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+
+  .panel-fade { animation: panelFadeIn .3s ease; }
+  @keyframes panelFadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
 
   .paytable {
     margin-top: clamp(20px, 5vw, 30px);
@@ -395,6 +441,11 @@
   .crash-history-item.low { color: var(--danger); }
   .crash-history-item.mid { color: var(--text-0); }
   .crash-history-item.high { color: var(--gold); }
+  .crash-history-item.newest { animation: historyPop .35s cubic-bezier(.25,1.4,.4,1); }
+  @keyframes historyPop {
+    0% { transform: scale(.6); opacity: 0; }
+    100% { transform: scale(1); opacity: 1; }
+  }
 
   .crash-stage {
     background: var(--bg-1);
@@ -403,19 +454,36 @@
     padding: clamp(24px, 8vw, 40px) clamp(14px, 4vw, 22px);
     text-align: center;
     margin-bottom: clamp(16px, 4.5vw, 22px);
-    transition: border-color .2s ease;
+    transition: border-color .2s ease, box-shadow .2s ease;
   }
-  .crash-stage.running { border-color: var(--gold); }
-  .crash-stage.crashed { border-color: var(--danger); }
+  .crash-stage.running {
+    border-color: var(--gold);
+    animation: crashPulse 1.1s ease-in-out infinite;
+  }
+  .crash-stage.crashed {
+    border-color: var(--danger);
+    animation: crashShake .4s ease;
+  }
+  @keyframes crashPulse {
+    0%, 100% { box-shadow: 0 0 0 1px var(--gold) inset, 0 0 10px rgba(232,184,75,0.25); }
+    50% { box-shadow: 0 0 0 1px var(--gold) inset, 0 0 28px rgba(232,184,75,0.6); }
+  }
+  @keyframes crashShake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-6px); }
+    40% { transform: translateX(5px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(3px); }
+  }
   .crash-mult {
     font-size: clamp(38px, 12vw, 60px);
     font-weight: 800;
     color: var(--text-0);
     font-variant-numeric: tabular-nums;
-    transition: color .2s ease;
+    transition: color .2s ease, transform .15s ease;
   }
   .crash-stage.running .crash-mult { color: var(--gold); }
-  .crash-stage.crashed .crash-mult { color: var(--danger); }
+  .crash-stage.crashed .crash-mult { color: var(--danger); transform: scale(1.08); }
   .crash-status {
     margin-top: 8px;
     font-size: clamp(12px, 3.2vw, 14px);
@@ -451,7 +519,7 @@
     display: flex; align-items: center; justify-content: center;
     font-size: clamp(16px, 5vw, 22px);
     cursor: pointer;
-    transition: border-color .15s ease, transform .1s ease;
+    transition: border-color .15s ease, transform .1s ease, box-shadow .2s ease;
     user-select: none;
   }
   .mines-tile:active { transform: scale(.93); }
@@ -459,6 +527,7 @@
     border-color: var(--success);
     box-shadow: 0 0 0 1px var(--success) inset;
     cursor: default;
+    animation: tileReveal .32s cubic-bezier(.22,1.6,.4,1);
   }
   .mines-tile.mine {
     border-color: var(--danger);
@@ -469,8 +538,20 @@
     border-color: var(--danger);
     background: rgba(226,85,74,0.18);
     cursor: default;
+    animation: tileHit .45s ease;
   }
   .mines-tile.locked { cursor: default; opacity: .85; }
+  @keyframes tileReveal {
+    0% { transform: scale(.7) rotate(-8deg); opacity: 0; }
+    60% { transform: scale(1.12) rotate(3deg); opacity: 1; }
+    100% { transform: scale(1) rotate(0); }
+  }
+  @keyframes tileHit {
+    0% { transform: scale(1); }
+    30% { transform: scale(1.3) rotate(-6deg); }
+    55% { transform: scale(.9) rotate(4deg); }
+    100% { transform: scale(1) rotate(0); }
+  }
 
   .footnote {
     text-align: center;
@@ -600,7 +681,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -629,7 +710,6 @@
   var COINFLIP_WIN_MULT = 2.0;
   var BLACKRED_WIN_MULT = 2.0;
 
-  
   var GAMES = {
     roulette: { title: "Рулетка", pick: null },
     dice:     { title: "Кости", pick: "dice" },
@@ -694,16 +774,26 @@
 
   function apiCall(path, extra, cb){
     var body = Object.assign({ initData: state.initData }, extra || {});
+    var controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    var timedOut = false;
+    var timer = controller ? setTimeout(function(){
+      timedOut = true;
+      controller.abort();
+    }, 10000) : null; // 10с — дольше сервер точно не должен думать
+
     fetch(API_BASE_URL + path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: controller ? controller.signal : undefined
     }).then(function(res){
       return res.json().then(function(data){ return { ok: res.ok, data: data }; });
     }).then(function(r){
+      if (timer) clearTimeout(timer);
       cb(r.ok ? null : (r.data && r.data.error) || "error", r.data);
     }).catch(function(err){
-      cb(String(err), null);
+      if (timer) clearTimeout(timer);
+      cb(timedOut ? "timeout" : String(err), null);
     });
   }
 
@@ -744,8 +834,11 @@
     document.getElementById("statGames").textContent = state.games;
     document.getElementById("statBest").textContent = state.bestWin;
     if (bump) {
+      el.classList.remove("bump-win", "bump-lose");
+      var cls = (bump === "win") ? "bump-win" : (bump === "lose") ? "bump-lose" : "";
+      if (cls) el.classList.add(cls);
       el.classList.add("bump");
-      setTimeout(function(){ el.classList.remove("bump"); }, 150);
+      setTimeout(function(){ el.classList.remove("bump", "bump-win", "bump-lose"); }, 420);
     }
   }
 
@@ -822,9 +915,17 @@
     });
   }
 
+  function triggerPanelFade(el){
+    if (!el) return;
+    el.classList.remove("panel-fade");
+    void el.offsetWidth; // перезапуск CSS-анимации
+    el.classList.add("panel-fade");
+  }
+
   function switchGame(){
     renderTabs();
     document.getElementById("gameTitle").textContent = GAMES[state.game].title;
+    triggerPanelFade(document.getElementById("gameTitle"));
 
     var isCustom = !!GAMES[state.game].custom;
     var standardIds = ["stage", "pickerRow", "betRow", "spinBtn", "resultMsg", "paytable"];
@@ -838,12 +939,14 @@
       state.spinning = false;
       stopMinesPolling();
       startCrashPolling();
+      triggerPanelFade(document.getElementById("crashPanel"));
       return;
     }
     if (state.game === "mines") {
       state.spinning = false;
       stopCrashPolling();
       startMinesPolling();
+      triggerPanelFade(document.getElementById("minesPanel"));
       return;
     }
     stopCrashPolling();
@@ -852,6 +955,7 @@
     renderStageIdle();
     renderPicker();
     renderPaytable();
+    triggerPanelFade(document.getElementById("stage"));
     var msg = document.getElementById("resultMsg");
     msg.className = "result-msg";
     msg.textContent = "Выбери ставку и жми «Крутить»";
@@ -959,22 +1063,18 @@
     }
   }
 
-  function setReelCells(symbol, spinning, win){
-    for (var i=0;i<3;i++){
-      var cell = document.getElementById("cell"+i);
-      if (!cell) continue;
-      cell.textContent = symbol;
-      cell.classList.toggle("spinning", !!spinning);
-      cell.classList.toggle("win", !!win);
-    }
-  }
-
   function setReelCellsEach(symbols, win, highlightIndex){
     for (var i=0;i<3;i++){
       var cell = document.getElementById("cell"+i);
       if (!cell) continue;
+      var wasSpinning = cell.classList.contains("spinning");
       cell.textContent = symbols[i];
       cell.classList.remove("spinning");
+      if (wasSpinning) {
+        cell.classList.remove("settle");
+        void cell.offsetWidth; // перезапуск CSS-анимации
+        cell.classList.add("settle");
+      }
       if (typeof highlightIndex === "number") {
         // Подсвечиваем только ячейку с настоящим результатом — остальные
         // 2 чисто декоративные и не должны выглядеть как "тоже выиграли".
@@ -989,8 +1089,14 @@
   function setSingleStage(symbol, spinning, win){
     var el = document.getElementById("stageSingle");
     if (!el) return;
+    var wasSpinning = el.classList.contains("spinning");
     el.textContent = symbol;
     el.classList.toggle("spinning", !!spinning);
+    if (wasSpinning && !spinning) {
+      el.classList.remove("settle");
+      void el.offsetWidth;
+      el.classList.add("settle");
+    }
     el.classList.toggle("win", !!win);
   }
 
@@ -1142,11 +1248,11 @@
     var delta = winnings - bet;
     var msg = document.getElementById("resultMsg");
     if (winnings > 0) {
-      msg.className = "result-msg win";
+      msg.className = "result-msg win pop";
       msg.textContent = extraLabel + " — выигрыш +" + winnings + " (чистыми " + (delta>=0?"+":"") + delta + ")";
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
     } else {
-      msg.className = "result-msg lose";
+      msg.className = "result-msg lose pop";
       msg.textContent = extraLabel + " — минус " + bet;
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
     }
@@ -1184,7 +1290,7 @@
       setSingleStage(symMap[data.result], false, win);
       showOutcome(game, data.winnings, data.bet, symMap[data.result] + " " + labelMap[data.result]);
     }
-    applyBalance(data.balance, data.games_played, data.best_win, true);
+    applyBalance(data.balance, data.games_played, data.best_win, win ? "win" : "lose");
   }
 
   function finishWithLocal(game, bet){
@@ -1212,7 +1318,7 @@
     var newBalance = state.balance + (r.winnings - bet);
     var newGames = state.games + 1;
     var newBest = Math.max(state.bestWin, r.winnings);
-    applyBalance(newBalance, newGames, newBest, true);
+    applyBalance(newBalance, newGames, newBest, win ? "win" : "lose");
   }
 
   // ---------- Загрузочная анимация ----------
@@ -1260,7 +1366,7 @@
         msg.className = "result-msg win";
         msg.textContent = data.message + " +" + data.amount;
         input.value = "";
-        applyBalance(data.balance, data.games_played, data.best_win, true);
+        applyBalance(data.balance, data.games_played, data.best_win, "win");
         if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
       } else {
         msg.className = "result-msg lose";
@@ -1280,6 +1386,8 @@
     customBetActive: false,
     pollTimer: null,
     lastRoundId: null,
+    lastPhase: null,
+    lastHistoryTop: null,
     myBetThisRound: false,
     cashedOutThisRound: false
   };
@@ -1311,11 +1419,13 @@
 
   function renderCrashHistory(history){
     var wrap = document.getElementById("crashHistory");
+    var isNewTop = history.length > 0 && history[0] !== crashUI.lastHistoryTop;
+    crashUI.lastHistoryTop = history.length > 0 ? history[0] : crashUI.lastHistoryTop;
     wrap.innerHTML = "";
-    history.forEach(function(point){
+    history.forEach(function(point, i){
       var el = document.createElement("div");
       var cls = point < 2 ? "low" : (point < 10 ? "mid" : "high");
-      el.className = "crash-history-item " + cls;
+      el.className = "crash-history-item " + cls + (i === 0 && isNewTop ? " newest" : "");
       el.textContent = point.toFixed(2) + "x";
       wrap.appendChild(el);
     });
@@ -1368,7 +1478,14 @@
 
       renderCrashHistory(data.history || []);
       multEl.textContent = data.multiplier.toFixed(2) + "x";
-      box.className = "crash-stage" + (data.phase === "running" ? " running" : data.phase === "crashed" ? " crashed" : "");
+      var phaseChanged = crashUI.lastPhase !== data.phase;
+      crashUI.lastPhase = data.phase;
+      var stageClass = "crash-stage" + (data.phase === "running" ? " running" : data.phase === "crashed" ? " crashed" : "");
+      if (phaseChanged) {
+        box.className = ""; // сброс, чтобы анимация (тряска/пульс) гарантированно перезапустилась
+        void box.offsetWidth;
+      }
+      box.className = stageClass;
 
       var hasBet = !!data.myBet;
       if (hasBet) crashUI.myBetThisRound = true;
@@ -1421,7 +1538,7 @@
       crashUI.myBetThisRound = true;
       msg.className = "result-msg";
       msg.textContent = "Ставка " + crashUI.bet + " принята!";
-      applyBalance(data.balance, data.games_played, data.best_win, true);
+      applyBalance(data.balance, data.games_played, data.best_win, "lose");
       pollCrashOnce();
     });
   }
@@ -1441,7 +1558,7 @@
       crashUI.cashedOutThisRound = true;
       msg.className = "result-msg win";
       msg.textContent = "Выведено на ×" + data.multiplier.toFixed(2) + "! Выигрыш +" + data.winnings;
-      applyBalance(data.balance, data.games_played, data.best_win, true);
+      applyBalance(data.balance, data.games_played, data.best_win, "win");
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
       pollCrashOnce();
     });
@@ -1600,7 +1717,7 @@
       }
       msg.className = "result-msg";
       msg.textContent = "";
-      applyBalance(data.balance, data.games_played, data.best_win, true);
+      applyBalance(data.balance, data.games_played, data.best_win, "lose");
       minesUI.active = true;
       minesUI.revealed = [];
       document.getElementById("minesMultLabel").textContent = "×1.00";
@@ -1628,7 +1745,7 @@
         document.getElementById("minesActionBtn").disabled = false;
         msg.className = "result-msg lose";
         msg.textContent = "Тут была мина — ставка потеряна.";
-        applyBalance(data.balance, data.games_played, data.best_win, true);
+        applyBalance(data.balance, data.games_played, data.best_win, "lose");
         minesUI.active = false;
         if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
       } else if (data.kind === "cleared") {
@@ -1639,7 +1756,7 @@
         document.getElementById("minesActionBtn").disabled = false;
         msg.className = "result-msg win";
         msg.textContent = "Выигрыш ×" + data.multiplier.toFixed(2) + ": +" + data.winnings;
-        applyBalance(data.balance, data.games_played, data.best_win, true);
+        applyBalance(data.balance, data.games_played, data.best_win, "win");
         minesUI.active = false;
         if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
       } else {
@@ -1670,7 +1787,7 @@
       btn.disabled = false;
       msg.className = "result-msg win";
       msg.textContent = "Выигрыш ×" + data.multiplier.toFixed(2) + ": +" + data.winnings;
-      applyBalance(data.balance, data.games_played, data.best_win, true);
+      applyBalance(data.balance, data.games_played, data.best_win, "win");
       minesUI.active = false;
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
     });
@@ -1705,6 +1822,7 @@
     renderBalance(false);
     runLoader(function(){
       document.getElementById("loader").classList.add("hidden");
+      document.getElementById("app").classList.add("revealed");
     });
   });
 })();
