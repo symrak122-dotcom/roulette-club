@@ -287,6 +287,50 @@
   .single-stage.spinning { animation: reelSpin .22s linear infinite; filter: blur(1px); }
   .single-stage.settle { animation: reelSettle .38s cubic-bezier(.22,1.6,.4,1); }
 
+  /* ---------- Чёрное/красное: настоящее вращающееся колесо ---------- */
+  .wheel-wrap {
+    position: relative;
+    width: min(230px, 62vw);
+    aspect-ratio: 1 / 1;
+    margin: 0 auto clamp(18px, 5vw, 26px);
+  }
+  .wheel {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 5px solid var(--bg-2);
+    box-shadow: 0 0 0 2px rgba(0,0,0,0.35) inset, 0 8px 24px rgba(0,0,0,0.35);
+    transition: transform 2.6s cubic-bezier(.14,.68,.18,1);
+  }
+  .wheel.fast-spin { animation: wheelFastSpin .7s linear infinite; transition: none; }
+  @keyframes wheelFastSpin { to { transform: rotate(360deg); } }
+  .wheel-pointer {
+    position: absolute;
+    top: -4px; left: 50%;
+    transform: translateX(-50%);
+    width: 0; height: 0;
+    border-left: 11px solid transparent;
+    border-right: 11px solid transparent;
+    border-top: 18px solid var(--gold);
+    filter: drop-shadow(0 2px 3px rgba(0,0,0,.5));
+    z-index: 2;
+  }
+  .wheel-center {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 34%; height: 34%;
+    border-radius: 50%;
+    background: var(--bg-1);
+    border: 2px solid var(--gold);
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(20px, 6vw, 30px);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+    transition: box-shadow .2s ease;
+  }
+  .wheel-center.win { box-shadow: 0 0 0 2px var(--gold), 0 0 20px rgba(232,184,75,0.6); }
+  .wheel-center.lose { box-shadow: 0 0 0 2px var(--danger), 0 0 16px rgba(226,85,74,0.45); }
+
   /* ---------- Picker rows (dice number / coin side / color) ---------- */
   .picker-row {
     display: flex;
@@ -681,7 +725,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -1059,7 +1103,15 @@
     } else if (state.game === "coinflip") {
       stage.innerHTML = '<div class="single-stage" id="stageSingle">🪙</div>';
     } else if (state.game === "blackred") {
-      stage.innerHTML = '<div class="single-stage" id="stageSingle">🎡</div>';
+      stage.innerHTML =
+        '<div class="wheel-wrap">' +
+          '<div class="wheel-pointer"></div>' +
+          '<div class="wheel" id="blackredWheel"></div>' +
+          '<div class="wheel-center" id="blackredWheelCenter">🎯</div>' +
+        '</div>';
+      var wheelEl = document.getElementById("blackredWheel");
+      wheelEl.style.background = buildWheelGradient();
+      wheelEl.style.transform = "rotate(" + wheelRotation + "deg)";
     }
   }
 
@@ -1126,6 +1178,55 @@
     var left = others.length > 0 ? others[0] : winSymbol;
     var right = others.length > 1 ? others[1] : winSymbol;
     return { reels: [left, winSymbol, right], index: 1 };
+  }
+
+  // ---------- Колесо "Чёрное/красное" — настоящее вращающееся колесо ----------
+  // Последовательность цветов повторяет обычное рулеточное колесо: одно
+  // зелёное зеро и дальше строго чередующиеся красные/чёрные сектора —
+  // 18 красных и 18 чёрных, как в честной рулетке.
+  var WHEEL_SEQUENCE = ["green"];
+  for (var wseq = 0; wseq < 36; wseq++) WHEEL_SEQUENCE.push(wseq % 2 === 0 ? "red" : "black");
+  var WHEEL_SEGMENTS = WHEEL_SEQUENCE.length; // 37
+  var WHEEL_SEGMENT_DEG = 360 / WHEEL_SEGMENTS;
+  var WHEEL_COLOR_HEX = { red: "#e2554a", black: "#20232c", green: "#2fae6c" };
+  var wheelRotation = 0; // накопленный угол — всегда растёт, чтобы колесо крутилось вперёд
+
+  function buildWheelGradient(){
+    var stops = [];
+    for (var i = 0; i < WHEEL_SEGMENTS; i++){
+      var color = WHEEL_COLOR_HEX[WHEEL_SEQUENCE[i]];
+      var start = (i * WHEEL_SEGMENT_DEG).toFixed(3);
+      var end = ((i + 1) * WHEEL_SEGMENT_DEG).toFixed(3);
+      stops.push(color + " " + start + "deg " + end + "deg");
+    }
+    return "conic-gradient(from 0deg, " + stops.join(", ") + ")";
+  }
+
+  // Раскручивает колесо так, чтобы под указателем (зафиксирован сверху)
+  // остановился сектор именно нужного цвета — как в настоящем
+  // чёрном/красном, где цвет определяет исход ставки.
+  function spinWheelTo(colorName, durationMs, onDone){
+    var wheelEl = document.getElementById("blackredWheel");
+    if (!wheelEl) { if (onDone) onDone(); return; }
+
+    var indices = [];
+    for (var i = 0; i < WHEEL_SEGMENTS; i++) if (WHEEL_SEQUENCE[i] === colorName) indices.push(i);
+    var idx = indices[Math.floor(Math.random() * indices.length)];
+    var center = (idx + 0.5) * WHEEL_SEGMENT_DEG;
+
+    var current = wheelRotation % 360;
+    var targetMod = (360 - center) % 360;
+    var delta = (targetMod - current + 360) % 360;
+    var extraSpins = 1 + Math.floor(Math.random() * 5); // от 1 до 5 полных оборотов
+    wheelRotation += 360 * extraSpins + delta;
+
+    wheelEl.classList.remove("fast-spin");
+    wheelEl.style.transition = "transform " + (durationMs / 1000) + "s cubic-bezier(.14,.68,.18,1)";
+    // Форсируем перерасчёт стиля, чтобы transition точно применился после снятия fast-spin.
+    void wheelEl.offsetWidth;
+    wheelEl.style.transform = "rotate(" + wheelRotation + "deg)";
+
+    if (onDone) setTimeout(onDone, durationMs + 60);
   }
 
   function localPlay(game, bet){
@@ -1224,8 +1325,15 @@
       } else if (game === "coinflip") {
         setSingleStage(i % 2 === 0 ? "🪙" : "◐", true, false);
       } else if (game === "blackred") {
-        var colors = ["🔴","⚫","🔴","⚫","🟢"];
-        setSingleStage(colors[Math.floor(Math.random()*colors.length)], true, false);
+        if (i === 0) {
+          var wheelEl = document.getElementById("blackredWheel");
+          if (wheelEl) {
+            wheelEl.style.transition = "";
+            wheelEl.classList.add("fast-spin");
+          }
+          var centerEl = document.getElementById("blackredWheelCenter");
+          if (centerEl) { centerEl.className = "wheel-center"; centerEl.textContent = "🎯"; }
+        }
       }
       i++;
       if (i < ticks) {
@@ -1285,10 +1393,8 @@
       setSingleStage(data.result === "орёл" ? "🦅" : "🔵", false, win);
       showOutcome(game, data.winnings, data.bet, "Выпало: " + data.result);
     } else if (game === "blackred") {
-      var symMap = { red: "🔴", black: "⚫", green: "🟢" };
-      var labelMap = { red: "Красное", black: "Чёрное", green: "Зеро" };
-      setSingleStage(symMap[data.result], false, win);
-      showOutcome(game, data.winnings, data.bet, symMap[data.result] + " " + labelMap[data.result]);
+      finishBlackredWithWheel(win, data.result, data.winnings, data.bet, data.balance, data.games_played, data.best_win);
+      return; // баланс и текст результата применятся после остановки колеса
     }
     applyBalance(data.balance, data.games_played, data.best_win, win ? "win" : "lose");
   }
@@ -1310,15 +1416,33 @@
       setSingleStage(r.extra.result === "орёл" ? "🦅" : "🔵", false, win);
       showOutcome(game, r.winnings, bet, "Выпало: " + r.extra.result);
     } else if (game === "blackred") {
-      var symMap = { red: "🔴", black: "⚫", green: "🟢" };
-      var labelMap = { red: "Красное", black: "Чёрное", green: "Зеро" };
-      setSingleStage(symMap[r.extra.result], false, win);
-      showOutcome(game, r.winnings, bet, symMap[r.extra.result] + " " + labelMap[r.extra.result]);
+      var newBalance0 = state.balance + (r.winnings - bet);
+      var newGames0 = state.games + 1;
+      var newBest0 = Math.max(state.bestWin, r.winnings);
+      finishBlackredWithWheel(win, r.extra.result, r.winnings, bet, newBalance0, newGames0, newBest0);
+      return; // баланс и текст результата применятся после остановки колеса
     }
     var newBalance = state.balance + (r.winnings - bet);
     var newGames = state.games + 1;
     var newBest = Math.max(state.bestWin, r.winnings);
     applyBalance(newBalance, newGames, newBest, win ? "win" : "lose");
+  }
+
+  // Раскручивает колесо чёрное/красное до настоящего результата и только
+  // после остановки показывает текст/баланс — как в честной рулетке,
+  // где сначала крутится колесо, и лишь потом объявляется исход.
+  function finishBlackredWithWheel(win, resultColor, winnings, bet, balance, gamesPlayed, bestWin){
+    var labelMap = { red: "Красное", black: "Чёрное", green: "Зеро" };
+    var symMap = { red: "🔴", black: "⚫", green: "🟢" };
+    spinWheelTo(resultColor, 2600, function(){
+      var centerEl = document.getElementById("blackredWheelCenter");
+      if (centerEl) {
+        centerEl.textContent = symMap[resultColor];
+        centerEl.className = "wheel-center " + (win ? "win" : "lose");
+      }
+      showOutcome("blackred", winnings, bet, labelMap[resultColor]);
+      applyBalance(balance, gamesPlayed, bestWin, win ? "win" : "lose");
+    });
   }
 
   // ---------- Загрузочная анимация ----------
