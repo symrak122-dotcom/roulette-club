@@ -1,5 +1,5 @@
 """
-
+Telegram-бот: профили пользователей + мини-игры казино (виртуальная валюта) + анимации.
 
 ВАЖНО:
 - Это ИГРОВАЯ механика с виртуальными очками, НЕ имеющими денежной стоимости
@@ -14,6 +14,7 @@
 - 🎯 Слоты         /slots [ставка]
 - 🪙 Монетка       /coinflip [ставка] [орёл|решка]
 - 🔴⚫ Чёрное/красное /blackred [ставка] [красное|чёрное]
+- ⬆️ Апгрейд         /upgrade [ставка] [шанс 2-95] — чем ниже шанс, тем выше множитель
 - 🚀 Краш           /crash [ставка] затем /cashout — общий раунд с мини-приложением
 - 💣 Мины           /mines [ставка] [3|5|8] — сетка 5×5, забирай выигрыш вовремя
 
@@ -111,7 +112,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -154,6 +155,18 @@ BLACKRED_RED_COUNT = 18
 BLACKRED_BLACK_COUNT = 18
 BLACKRED_GREEN_COUNT = 1
 BLACKRED_WIN_MULTIPLIER = 2.0
+
+# --- Апгрейд: игрок выбирает шанс на успех (2-95%), выигрыш умножает
+# ставку на (100/шанс), скорректированный на небольшой house edge — чем
+# ниже выбранный шанс, тем выше потенциальный множитель, и наоборот. ---
+UPGRADE_HOUSE_EDGE = 0.95
+UPGRADE_MIN_CHANCE = 2.0
+UPGRADE_MAX_CHANCE = 75.0
+
+
+def upgrade_multiplier(chance: float) -> float:
+    chance = max(UPGRADE_MIN_CHANCE, min(UPGRADE_MAX_CHANCE, chance))
+    return round((100.0 / chance) * UPGRADE_HOUSE_EDGE, 4)
 
 # --- Краш: множитель растёт со временем, игрок должен успеть "забрать"
 # выигрыш до того, как раунд оборвётся на случайной точке. Точка обрыва
@@ -887,6 +900,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🎯 /slots [ставка] — три барабана, совпадения дают выигрыш\n"
         f"🪙 /coinflip [ставка] [орёл|решка] — выигрыш x{COINFLIP_WIN_MULTIPLIER}\n"
         f"🔴⚫ /blackred [ставка] [красное|чёрное] — выигрыш x{BLACKRED_WIN_MULTIPLIER}\n"
+        f"⬆️ /upgrade [ставка] [шанс 2-95] — множитель = (100/шанс)×{UPGRADE_HOUSE_EDGE}\n"
         f"🚀 /crash [ставка], затем /cashout — множитель растёт, успей вывести до обрыва (макс. x{CRASH_MAX_MULTIPLIER:.0f})\n"
         f"💣 /mines [ставка] [3|5|8] — сетка 5×5, открывай клетки и забирай выигрыш вовремя\n\n"
         "🎟️ /promo КОД — активировать промокод\n"
@@ -1216,6 +1230,52 @@ async def blackred(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_edit(msg, f"{outcome}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
 
 
+async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/upgrade СТАВКА [шанс 2-95] — классический "апгрейд": чем ниже
+    выбранный шанс на успех, тем выше множитель выигрыша."""
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    bet = parse_bet(context)
+    if not await check_bet(update, user, bet):
+        return
+
+    chance = 50.0
+    if len(context.args) > 1:
+        try:
+            chance = float(context.args[1].replace(",", "."))
+        except ValueError:
+            chance = 50.0
+    chance = max(UPGRADE_MIN_CHANCE, min(UPGRADE_MAX_CHANCE, chance))
+    mult = upgrade_multiplier(chance)
+
+    msg = await update.message.reply_text(
+        f"⬆️ Апгрейд — ставка {bet}, шанс {chance:g}%, множитель ×{mult}\n\n[ 🎯 крутим... ]"
+    )
+
+    spins = 12
+    for i in range(spins):
+        delay = 0.07 + (i / spins) * 0.22
+        fake_roll = round(random.uniform(0, 100), 1)
+        await asyncio.sleep(delay)
+        await safe_edit(msg, f"⬆️ Апгрейд — ставка {bet}, шанс {chance:g}%, множитель ×{mult}\n\n[ 🎯 {fake_roll:g}% ]")
+
+    roll = random.uniform(0, 100)
+    win = roll < chance
+    winnings = int(bet * mult) if win else 0
+    new_balance, delta = settle(tg_user.id, bet, winnings)
+
+    if win:
+        outcome = f"🎉 Выпало {roll:.1f}% — попал в зону {chance:g}%!\nВыигрыш: +{winnings} (x{mult})"
+    else:
+        outcome = f"😔 Выпало {roll:.1f}% — мимо зоны {chance:g}%.\nПроигрыш: -{bet}"
+
+    await asyncio.sleep(0.2)
+    await safe_edit(msg, f"{outcome}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
+
+
 # ---------------------------------------------------------------------------
 # 🚀 Краш — общий раунд для бота и мини-приложения (см. crash_scheduler)
 # ---------------------------------------------------------------------------
@@ -1513,6 +1573,18 @@ async def api_play(request):
         win = result == choice
         winnings = int(bet * BLACKRED_WIN_MULTIPLIER) if win else 0
         payload = {"result": result, "choice": choice, "win": win}
+
+    elif game == "upgrade":
+        try:
+            chance = float(body.get("chance"))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid_chance"}, status=400, headers=_cors_headers())
+        chance = max(UPGRADE_MIN_CHANCE, min(UPGRADE_MAX_CHANCE, chance))
+        roll = random.uniform(0, 100)
+        win = roll < chance
+        mult = upgrade_multiplier(chance)
+        winnings = int(bet * mult) if win else 0
+        payload = {"chance": chance, "roll": round(roll, 2), "win": win, "multiplier": mult}
 
     else:
         return web.json_response({"error": "unknown_game"}, status=400, headers=_cors_headers())
@@ -2360,6 +2432,7 @@ def main() -> None:
     application.add_handler(CommandHandler("slots", slots))
     application.add_handler(CommandHandler("coinflip", coinflip))
     application.add_handler(CommandHandler("blackred", blackred))
+    application.add_handler(CommandHandler("upgrade", upgrade_cmd))
     application.add_handler(CommandHandler("crash", crash_cmd))
     application.add_handler(CommandHandler("cashout", cashout_cmd))
     application.add_handler(CommandHandler("mines", mines_cmd))

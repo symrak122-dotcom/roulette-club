@@ -331,6 +331,74 @@
   .wheel-center.win { box-shadow: 0 0 0 2px var(--gold), 0 0 20px rgba(232,184,75,0.6); }
   .wheel-center.lose { box-shadow: 0 0 0 2px var(--danger), 0 0 16px rgba(226,85,74,0.45); }
 
+  /* ---------- Апгрейд: круговой индикатор шанса ---------- */
+  .upgrade-gauge {
+    position: relative;
+    width: min(240px, 64vw);
+    aspect-ratio: 1 / 1;
+    margin: 0 auto clamp(18px, 5vw, 26px);
+  }
+  .upgrade-ring { width: 100%; height: 100%; transform: rotate(90deg); overflow: visible; }
+  .upgrade-track {
+    fill: none;
+    stroke: var(--bg-2);
+    stroke-width: 14;
+  }
+  .upgrade-arc {
+    fill: none;
+    stroke: var(--gold);
+    stroke-width: 14;
+    stroke-linecap: round;
+    transition: stroke-dasharray .3s ease;
+  }
+  .upgrade-needle {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 3px;
+    height: 43%;
+    background: linear-gradient(to top, var(--gold), rgba(232,184,75,0));
+    transform-origin: 50% 100%;
+    transform: translate(-50%, -100%) rotate(0deg);
+    transition: transform .4s cubic-bezier(.34,1.2,.4,1);
+    border-radius: 3px;
+    box-shadow: 0 0 8px rgba(232,184,75,0.6);
+  }
+  .upgrade-needle::after {
+    content: "";
+    position: absolute;
+    top: -2px; left: 50%;
+    transform: translateX(-50%);
+    width: 0; height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 9px solid var(--gold);
+  }
+  .upgrade-center {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 56%; height: 56%;
+    border-radius: 50%;
+    background: var(--bg-1);
+    border: 2px solid var(--bg-2);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+    transition: box-shadow .2s ease, border-color .2s ease;
+  }
+  .upgrade-center.win { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold), 0 0 22px rgba(232,184,75,0.6); }
+  .upgrade-center.lose { border-color: var(--danger); box-shadow: 0 0 0 2px var(--danger), 0 0 16px rgba(226,85,74,0.45); }
+  .upgrade-mult {
+    font-size: clamp(20px, 6vw, 28px);
+    font-weight: 800;
+    color: var(--gold);
+    font-variant-numeric: tabular-nums;
+  }
+  .upgrade-chance {
+    font-size: clamp(11px, 3vw, 13px);
+    color: var(--text-1);
+    margin-top: 2px;
+  }
+
   /* ---------- Picker rows (dice number / coin side / color) ---------- */
   .picker-row {
     display: flex;
@@ -703,6 +771,27 @@
     </div>
   </div>
 
+  <div id="upgradePanel" style="display:none;">
+    <div class="picker-row" id="upgradeChanceRow"></div>
+    <div class="upgrade-gauge" id="upgradeGaugeWrap">
+      <svg viewBox="0 0 200 200" class="upgrade-ring">
+        <circle cx="100" cy="100" r="86" class="upgrade-track"></circle>
+        <circle cx="100" cy="100" r="86" class="upgrade-arc" id="upgradeArc"></circle>
+      </svg>
+      <div class="upgrade-needle" id="upgradeNeedle"></div>
+      <div class="upgrade-center">
+        <div class="upgrade-mult" id="upgradeMultLabel">×1.90</div>
+        <div class="upgrade-chance" id="upgradeChanceLabel">50%</div>
+      </div>
+    </div>
+    <div class="bet-row" id="upgradeBetRow"></div>
+    <button class="spin-btn" id="upgradeActionBtn">⬆️ Прокачать</button>
+    <div class="result-msg" id="upgradeMsg"></div>
+    <div class="footnote" style="margin-top:14px;">
+      Стрелка честно останавливается на случайном числе 0–100. Попал в золотую зону (твой шанс) — выигрыш, мимо — ставка сгорает. Чем меньше шанс, тем выше множитель.
+    </div>
+  </div>
+
   <div class="paytable" id="paytable">
     <div class="section-title" style="margin-bottom:10px;">Таблица выигрышей</div>
   </div>
@@ -725,7 +814,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -761,9 +850,10 @@
     coinflip: { title: "Монетка", pick: "coin" },
     blackred: { title: "Чёрное/красное", pick: "color" },
     crash:    { title: "Краш", pick: null, custom: true },
-    mines:    { title: "Мины", pick: null, custom: true }
+    mines:    { title: "Мины", pick: null, custom: true },
+    upgrade:  { title: "Апгрейд", pick: null, custom: true }
   };
-  var GAME_ORDER = ["roulette", "dice", "slots", "coinflip", "blackred", "crash", "mines"];
+  var GAME_ORDER = ["roulette", "dice", "slots", "coinflip", "blackred", "crash", "mines", "upgrade"];
 
   var state = {
     userId: "0000",
@@ -978,6 +1068,7 @@
     });
     document.getElementById("crashPanel").style.display = (state.game === "crash") ? "" : "none";
     document.getElementById("minesPanel").style.display = (state.game === "mines") ? "" : "none";
+    document.getElementById("upgradePanel").style.display = (state.game === "upgrade") ? "" : "none";
 
     if (state.game === "crash") {
       state.spinning = false;
@@ -991,6 +1082,16 @@
       stopCrashPolling();
       startMinesPolling();
       triggerPanelFade(document.getElementById("minesPanel"));
+      return;
+    }
+    if (state.game === "upgrade") {
+      state.spinning = false;
+      stopCrashPolling();
+      stopMinesPolling();
+      renderUpgradeChanceRow();
+      renderUpgradeBetRow();
+      renderUpgradeGauge(upgradeUI.chance, null);
+      triggerPanelFade(document.getElementById("upgradePanel"));
       return;
     }
     stopCrashPolling();
@@ -1926,6 +2027,200 @@
     }
   }
 
+  // ---------- Апгрейд: ставка + шанс, честная стрелка 0-100 ----------
+  var UPGRADE_HOUSE_EDGE = 0.95;
+  var UPGRADE_MIN_CHANCE = 2;
+  var UPGRADE_MAX_CHANCE = 75;
+  var UPGRADE_PRESETS = [25, 50, 75];
+  var upgradeRotation = 0; // накопленный угол стрелки — всегда растёт вперёд
+
+  var upgradeUI = {
+    bet: BET_OPTIONS[0],
+    customBetActive: false,
+    chance: 50,
+    customChanceActive: false,
+    spinning: false
+  };
+
+  function upgradeMultiplier(chance){
+    chance = Math.max(UPGRADE_MIN_CHANCE, Math.min(UPGRADE_MAX_CHANCE, chance));
+    return Math.round((100 / chance) * UPGRADE_HOUSE_EDGE * 10000) / 10000;
+  }
+
+  function renderUpgradeChanceRow(){
+    var row = document.getElementById("upgradeChanceRow");
+    row.innerHTML = "";
+    UPGRADE_PRESETS.forEach(function(v){
+      var el = document.createElement("div");
+      el.className = "pick" + (v === upgradeUI.chance && !upgradeUI.customChanceActive ? " active" : "");
+      el.textContent = v + "%";
+      el.onclick = function(){
+        if (upgradeUI.spinning) return;
+        upgradeUI.chance = v;
+        upgradeUI.customChanceActive = false;
+        renderUpgradeChanceRow();
+        renderUpgradeGauge(upgradeUI.chance, null);
+      };
+      row.appendChild(el);
+    });
+
+    var input = document.createElement("input");
+    input.type = "number";
+    input.min = String(UPGRADE_MIN_CHANCE);
+    input.max = String(UPGRADE_MAX_CHANCE);
+    input.inputMode = "numeric";
+    input.className = "chip-input" + (upgradeUI.customChanceActive ? " active" : "");
+    input.placeholder = "Свой %";
+    if (upgradeUI.customChanceActive) input.value = upgradeUI.chance;
+    input.addEventListener("input", function(){
+      if (upgradeUI.spinning) return;
+      var val = parseFloat(input.value);
+      if (val >= UPGRADE_MIN_CHANCE && val <= UPGRADE_MAX_CHANCE) {
+        input.classList.add("active");
+        upgradeUI.chance = val;
+        upgradeUI.customChanceActive = true;
+        row.querySelectorAll(".pick").forEach(function(p){ p.classList.remove("active"); });
+        renderUpgradeGauge(upgradeUI.chance, null);
+      } else {
+        input.classList.remove("active");
+      }
+    });
+    input.addEventListener("click", function(e){ e.stopPropagation(); });
+    row.appendChild(input);
+  }
+
+  function renderUpgradeBetRow(){
+    var row = document.getElementById("upgradeBetRow");
+    row.innerHTML = "";
+    BET_OPTIONS.forEach(function(v){
+      var chip = document.createElement("div");
+      chip.className = "chip" + (v === upgradeUI.bet && !upgradeUI.customBetActive ? " active" : "");
+      chip.textContent = v;
+      chip.onclick = function(){
+        if (upgradeUI.spinning) return;
+        upgradeUI.bet = v;
+        upgradeUI.customBetActive = false;
+        renderUpgradeBetRow();
+      };
+      row.appendChild(chip);
+    });
+    row.appendChild(buildCustomBetInput(
+      upgradeUI.customBetActive ? upgradeUI.bet : "",
+      function(val){
+        upgradeUI.bet = val;
+        upgradeUI.customBetActive = true;
+        clearChipActive(row);
+      },
+      function(){ return upgradeUI.spinning; }
+    ));
+  }
+
+  // Отрисовывает золотую дугу шанса и (если не идёт вращение) ставит
+  // стрелку ровно на границу зоны — как ориентир перед запуском.
+  function renderUpgradeGauge(chance, landedValue){
+    var arc = document.getElementById("upgradeArc");
+    var needle = document.getElementById("upgradeNeedle");
+    var multLabel = document.getElementById("upgradeMultLabel");
+    var chanceLabel = document.getElementById("upgradeChanceLabel");
+    if (!arc) return;
+
+    var r = 86;
+    var circumference = 2 * Math.PI * r;
+    var arcLen = circumference * (chance / 100);
+    arc.setAttribute("stroke-dasharray", arcLen.toFixed(2) + " " + (circumference - arcLen).toFixed(2));
+
+    multLabel.textContent = "×" + upgradeMultiplier(chance).toFixed(2);
+    chanceLabel.textContent = (chance % 1 === 0 ? chance : chance.toFixed(1)) + "%";
+
+    var angle = ((typeof landedValue === "number" ? landedValue : chance) / 100) * 360 + 180;
+    needle.style.transform = "translate(-50%, -100%) rotate(" + angle + "deg)";
+  }
+
+  function upgradePlay(){
+    if (upgradeUI.spinning) return;
+    var msg = document.getElementById("upgradeMsg");
+    if (upgradeUI.bet > state.balance) {
+      msg.className = "result-msg lose";
+      msg.textContent = "Недостаточно баланса для этой ставки";
+      return;
+    }
+
+    upgradeUI.spinning = true;
+    var btn = document.getElementById("upgradeActionBtn");
+    btn.disabled = true;
+    msg.className = "result-msg";
+    msg.textContent = "Крутим...";
+    var centerEl = document.querySelector("#upgradeGaugeWrap .upgrade-center");
+    if (centerEl) centerEl.className = "upgrade-center";
+
+    var bet = upgradeUI.bet;
+    var chance = upgradeUI.chance;
+
+    // Сначала узнаём настоящий результат и только потом запускаем ОДНУ
+    // плавную анимацию до него — так стрелка крутится с равномерным
+    // замедлением от начала до конца, без рывка на стыке "быстрого
+    // вращения" и "довода до ответа", как было раньше.
+    if (canUseApi()) {
+      apiCall("/api/play", { game: "upgrade", bet: bet, chance: chance }, function(err, data){
+        if (err || !data) {
+          finishUpgradeLocal(bet, chance);
+          return;
+        }
+        finishUpgrade(data.win, data.roll, data.multiplier, data.winnings, bet, data.balance, data.games_played, data.best_win);
+      });
+    } else {
+      finishUpgradeLocal(bet, chance);
+    }
+  }
+
+  function finishUpgradeLocal(bet, chance){
+    var roll = Math.round(Math.random() * 10000) / 100;
+    var win = roll < chance;
+    var mult = upgradeMultiplier(chance);
+    var winnings = win ? Math.round(bet * mult) : 0;
+    var newBalance = state.balance + (winnings - bet);
+    var newGames = state.games + 1;
+    var newBest = Math.max(state.bestWin, winnings);
+    finishUpgrade(win, roll, mult, winnings, bet, newBalance, newGames, newBest);
+  }
+
+  function finishUpgrade(win, roll, mult, winnings, bet, balance, gamesPlayed, bestWin){
+    var SPIN_DURATION_MS = 3000;
+    var extraSpins = 4 + Math.floor(Math.random() * 3); // 4-6 полных оборотов для одного цельного вращения
+    var targetAngle = (roll / 100) * 360 + 180;
+    var current = upgradeRotation % 360;
+    var delta = (targetAngle - current + 360) % 360;
+    upgradeRotation += 360 * extraSpins + delta;
+
+    var needle = document.getElementById("upgradeNeedle");
+    // Один непрерывный easing на всю дистанцию: быстрый старт и плавное
+    // замедление к финальной точке — без переключения между анимациями.
+    needle.style.transition = "transform " + (SPIN_DURATION_MS / 1000) + "s cubic-bezier(.11,.71,.13,1)";
+    needle.style.transform = "translate(-50%, -100%) rotate(" + upgradeRotation + "deg)";
+
+    setTimeout(function(){
+      var centerEl = document.querySelector("#upgradeGaugeWrap .upgrade-center");
+      if (centerEl) centerEl.className = "upgrade-center " + (win ? "win" : "lose");
+
+      var msg = document.getElementById("upgradeMsg");
+      var delta2 = winnings - bet;
+      if (winnings > 0) {
+        msg.className = "result-msg win pop";
+        msg.textContent = "Выпало " + roll.toFixed(1) + "% — попал! Выигрыш +" + winnings + " (чистыми " + (delta2>=0?"+":"") + delta2 + ")";
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+      } else {
+        msg.className = "result-msg lose pop";
+        msg.textContent = "Выпало " + roll.toFixed(1) + "% — мимо. Минус " + bet;
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+      }
+
+      applyBalance(balance, gamesPlayed, bestWin, win ? "win" : "lose");
+      upgradeUI.spinning = false;
+      document.getElementById("upgradeActionBtn").disabled = false;
+      needle.style.transition = ""; // вернуть резвый переход по умолчанию для переключения пресетов
+    }, SPIN_DURATION_MS + 60);
+  }
+
   // ---------- Инициализация ----------
   initUser();
   renderTabs();
@@ -1937,10 +2232,14 @@
   renderMinesCountRow();
   renderMinesBetRow();
   renderMinesGrid([], [], null, false);
+  renderUpgradeChanceRow();
+  renderUpgradeBetRow();
+  renderUpgradeGauge(upgradeUI.chance, null);
   document.getElementById("spinBtn").addEventListener("click", play);
   document.getElementById("promoBtn").addEventListener("click", redeemPromo);
   document.getElementById("crashActionBtn").addEventListener("click", crashActionClick);
   document.getElementById("minesActionBtn").addEventListener("click", minesActionClick);
+  document.getElementById("upgradeActionBtn").addEventListener("click", upgradePlay);
 
   loadState(function(){
     renderBalance(false);
