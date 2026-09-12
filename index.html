@@ -808,12 +808,134 @@
   if (tg) { tg.ready(); tg.expand(); }
 
   // ==========================================================================
+  // ЗВУК: короткие эффекты выигрыша/проигрыша и "прокрута" синтезируются
+  // на лету через Web Audio API — никаких внешних аудиофайлов не нужно.
+  // Звук создаётся по требованию первого взаимодействия (браузеры не дают
+  // запускать AudioContext до жеста пользователя).
+  // ==========================================================================
+  var audioCtx = null;
+  function getAudioCtx(){
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { audioCtx = null; }
+    }
+    if (audioCtx && audioCtx.state === "suspended") {
+      audioCtx.resume().catch(function(){});
+    }
+    return audioCtx;
+  }
+
+  function playTone(freq, startTime, duration, type, peakVolume){
+    var ctx = getAudioCtx();
+    if (!ctx) return;
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.type = type || "sine";
+    osc.frequency.setValueAtTime(freq, startTime);
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.linearRampToValueAtTime(peakVolume, startTime + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.03);
+  }
+
+  function playWinSound(){
+    var ctx = getAudioCtx();
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    playTone(523.25, t, 0.14, "triangle", 0.18);        // C5
+    playTone(659.25, t + 0.09, 0.14, "triangle", 0.18); // E5
+    playTone(783.99, t + 0.18, 0.26, "triangle", 0.2);  // G5
+  }
+
+  function playLoseSound(){
+    var ctx = getAudioCtx();
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    playTone(220.0, t, 0.16, "sawtooth", 0.12);
+    playTone(164.81, t + 0.13, 0.3, "sawtooth", 0.12);
+  }
+
+  // "Прокрут" — затухающий вой с понижением тона и частоты среза фильтра,
+  // как замедляющееся колесо. Используется в Апгрейде и Чёрном/красном.
+  var spinSoundNode = null;
+  function startSpinSound(durationSec){
+    var ctx = getAudioCtx();
+    if (!ctx) return;
+    stopSpinSound();
+    var t = ctx.currentTime;
+    var osc = ctx.createOscillator();
+    var filter = ctx.createBiquadFilter();
+    var gain = ctx.createGain();
+    osc.type = "sawtooth";
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(1100, t);
+    filter.frequency.exponentialRampToValueAtTime(160, t + durationSec);
+    osc.frequency.setValueAtTime(130, t);
+    osc.frequency.exponentialRampToValueAtTime(38, t + durationSec);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.linearRampToValueAtTime(0.05, t + 0.15);
+    gain.gain.setValueAtTime(0.05, t + Math.max(0.15, durationSec - 0.3));
+    gain.gain.linearRampToValueAtTime(0.0001, t + durationSec);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + durationSec + 0.05);
+    spinSoundNode = osc;
+  }
+  function stopSpinSound(){
+    if (spinSoundNode) {
+      try { spinSoundNode.stop(); } catch (e) {}
+      spinSoundNode = null;
+    }
+  }
+
+  // Одиночный "щелчок" трещотки — короткий импульс с быстрым затуханием.
+  function playClickTick(time, volume){
+    var ctx = getAudioCtx();
+    if (!ctx) return;
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(1700, time);
+    gain.gain.setValueAtTime(volume, time);
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.035);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(time);
+    osc.stop(time + 0.04);
+  }
+
+  // Серия щелчков, которая замедляется к концу — как трещотка колеса
+  // фортуны. Все моменты щелчков считаются заранее и планируются через
+  // точные тайминги Web Audio (а не setTimeout), поэтому ритм ровный.
+  function startUpgradeClickSpin(durationSec){
+    var ctx = getAudioCtx();
+    if (!ctx) return;
+    var t0 = ctx.currentTime;
+    var minInterval = 0.075; // самый частый щелчок в начале
+    var maxInterval = 0.55;  // самый редкий щелчок в конце
+    var elapsed = 0;
+    while (elapsed < durationSec) {
+      var progress = elapsed / durationSec;
+      var eased = progress * progress; // квадратичное замедление к финалу
+      var interval = minInterval + (maxInterval - minInterval) * eased;
+      var volume = 0.1 - eased * 0.04; // щелчки чуть тише к концу
+      playClickTick(t0 + elapsed, Math.max(0.04, volume));
+      elapsed += interval;
+    }
+  }
+
+  // ==========================================================================
   // НАСТРОЙКА: адрес API бота (см. секцию "HTTP-API для мини-приложения" в
   // bot.py). Пока сюда не вписан реальный HTTPS-адрес, приложение работает
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -1325,6 +1447,7 @@
     // Форсируем перерасчёт стиля, чтобы transition точно применился после снятия fast-spin.
     void wheelEl.offsetWidth;
     wheelEl.style.transform = "rotate(" + wheelRotation + "deg)";
+    startSpinSound(durationMs / 1000);
 
     if (onDone) setTimeout(onDone, durationMs + 60);
   }
@@ -1458,10 +1581,12 @@
     if (winnings > 0) {
       msg.className = "result-msg win pop";
       msg.textContent = extraLabel + " — выигрыш +" + winnings + " (чистыми " + (delta>=0?"+":"") + delta + ")";
+      playWinSound();
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
     } else {
       msg.className = "result-msg lose pop";
       msg.textContent = extraLabel + " — минус " + bet;
+      playLoseSound();
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
     }
     state.spinning = false;
@@ -1591,11 +1716,13 @@
         msg.textContent = data.message + " +" + data.amount;
         input.value = "";
         applyBalance(data.balance, data.games_played, data.best_win, "win");
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+        playWinSound();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
       } else {
         msg.className = "result-msg lose";
         msg.textContent = data.message || "Не удалось активировать код";
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+        playLoseSound();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
       }
     });
   }
@@ -1783,6 +1910,7 @@
       msg.className = "result-msg win";
       msg.textContent = "Выведено на ×" + data.multiplier.toFixed(2) + "! Выигрыш +" + data.winnings;
       applyBalance(data.balance, data.games_played, data.best_win, "win");
+      playWinSound();
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
       pollCrashOnce();
     });
@@ -1971,7 +2099,8 @@
         msg.textContent = "Тут была мина — ставка потеряна.";
         applyBalance(data.balance, data.games_played, data.best_win, "lose");
         minesUI.active = false;
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+        playLoseSound();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
       } else if (data.kind === "cleared") {
         minesUI.revealed.push(index);
         renderMinesGrid(minesUI.revealed, data.minePositions, null, true);
@@ -1982,7 +2111,8 @@
         msg.textContent = "Выигрыш ×" + data.multiplier.toFixed(2) + ": +" + data.winnings;
         applyBalance(data.balance, data.games_played, data.best_win, "win");
         minesUI.active = false;
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+        playWinSound();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
       } else {
         minesUI.revealed.push(index);
         renderMinesGrid(minesUI.revealed, [], null, false);
@@ -2013,6 +2143,7 @@
       msg.textContent = "Выигрыш ×" + data.multiplier.toFixed(2) + ": +" + data.winnings;
       applyBalance(data.balance, data.games_played, data.best_win, "win");
       minesUI.active = false;
+      playWinSound();
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
     });
   }
@@ -2253,6 +2384,7 @@
     // замедление к финальной точке — без переключения между анимациями.
     needle.style.transition = "transform " + (SPIN_DURATION_MS / 1000) + "s cubic-bezier(.11,.71,.13,1)";
     needle.style.transform = "translate(-50%, -100%) rotate(" + upgradeRotation + "deg)";
+    startUpgradeClickSpin(SPIN_DURATION_MS / 1000);
 
     setTimeout(function(){
       var centerEl = document.querySelector("#upgradeGaugeWrap .upgrade-center");
@@ -2263,11 +2395,13 @@
       if (winnings > 0) {
         msg.className = "result-msg win pop";
         msg.textContent = "Выпало " + roll.toFixed(1) + "% — попал! Выигрыш +" + winnings + " (чистыми " + (delta2>=0?"+":"") + delta2 + ")";
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+        playWinSound();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
       } else {
         msg.className = "result-msg lose pop";
         msg.textContent = "Выпало " + roll.toFixed(1) + "% — мимо. Минус " + bet;
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
+        playLoseSound();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("error");
       }
 
       applyBalance(balance, gamesPlayed, bestWin, win ? "win" : "lose");
