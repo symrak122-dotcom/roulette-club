@@ -349,7 +349,6 @@
     stroke: var(--gold);
     stroke-width: 14;
     stroke-linecap: round;
-    transition: stroke-dasharray .3s ease;
   }
   .upgrade-needle {
     position: absolute;
@@ -814,7 +813,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -2059,7 +2058,7 @@
         upgradeUI.chance = v;
         upgradeUI.customChanceActive = false;
         renderUpgradeChanceRow();
-        renderUpgradeGauge(upgradeUI.chance, null);
+        animateUpgradeGaugeTo(upgradeUI.chance);
       };
       row.appendChild(el);
     });
@@ -2080,7 +2079,7 @@
         upgradeUI.chance = val;
         upgradeUI.customChanceActive = true;
         row.querySelectorAll(".pick").forEach(function(p){ p.classList.remove("active"); });
-        renderUpgradeGauge(upgradeUI.chance, null);
+        animateUpgradeGaugeTo(upgradeUI.chance);
       } else {
         input.classList.remove("active");
       }
@@ -2117,9 +2116,27 @@
 
   // Отрисовывает золотую дугу шанса и (если не идёт вращение) ставит
   // стрелку ровно на границу зоны — как ориентир перед запуском.
-  function renderUpgradeGauge(chance, landedValue){
+  // Переводит выпавшее число (0-100) в угол стрелки так, чтобы золотая
+  // зона всегда была отцентрована по низу круга и росла симметрично в
+  // обе стороны с изменением шанса. Центр зоны (низ, 180°) соответствует
+  // "лучшему" попаданию ровно в середину шанса; края зоны — на границах
+  // выигрыша/проигрыша. Проигрышная часть делится на две половины,
+  // симметрично слева и справа, и вместе сходится наверху круга.
+  function upgradeAngleForRoll(roll, chance){
+    var halfGoldDeg = (chance / 100) * 180; // половина дуги золотой зоны в градусах
+    if (roll < chance) {
+      var t = chance > 0 ? roll / chance : 0;
+      return (180 - halfGoldDeg + t * 2 * halfGoldDeg + 360) % 360;
+    }
+    var loseRange = 100 - chance;
+    var t2 = loseRange > 0 ? (roll - chance) / loseRange : 0;
+    return (180 + halfGoldDeg + t2 * (360 - 2 * halfGoldDeg) + 360) % 360;
+  }
+
+  // Обновляет только золотую дугу и подписи (без стрелки) — используется
+  // как покадровый "кадр" плавной анимации при смене шанса.
+  function renderUpgradeGaugeArc(chance){
     var arc = document.getElementById("upgradeArc");
-    var needle = document.getElementById("upgradeNeedle");
     var multLabel = document.getElementById("upgradeMultLabel");
     var chanceLabel = document.getElementById("upgradeChanceLabel");
     if (!arc) return;
@@ -2127,13 +2144,52 @@
     var r = 86;
     var circumference = 2 * Math.PI * r;
     var arcLen = circumference * (chance / 100);
+    // dashoffset = половина длины дуги — центрирует золотую дугу ровно
+    // на стартовой точке кольца (низ круга), а не тянет её от края.
     arc.setAttribute("stroke-dasharray", arcLen.toFixed(2) + " " + (circumference - arcLen).toFixed(2));
+    arc.setAttribute("stroke-dashoffset", (arcLen / 2).toFixed(2));
 
     multLabel.textContent = "×" + upgradeMultiplier(chance).toFixed(2);
     chanceLabel.textContent = (chance % 1 === 0 ? chance : chance.toFixed(1)) + "%";
+  }
 
-    var angle = ((typeof landedValue === "number" ? landedValue : chance) / 100) * 360 + 180;
+  function renderUpgradeGauge(chance, landedValue){
+    renderUpgradeGaugeArc(chance);
+    upgradeDisplayedChance = chance;
+    var needle = document.getElementById("upgradeNeedle");
+    if (!needle) return;
+    // В покое стрелка смотрит точно в центр золотой зоны (низ круга) —
+    // это верно для любого шанса, ведь зона всегда центрирована по низу.
+    var angle = (typeof landedValue === "number") ? upgradeAngleForRoll(landedValue, chance) : 180;
     needle.style.transform = "translate(-50%, -100%) rotate(" + angle + "deg)";
+  }
+
+  // Плавно "перетекает" золотая дуга от текущего показанного значения к
+  // новому шансу — через requestAnimationFrame, а не через CSS-переход
+  // на stroke-dasharray, который анимируется нестабильно в браузерах.
+  var upgradeGaugeAnimId = null;
+  var upgradeDisplayedChance = null;
+  function animateUpgradeGaugeTo(targetChance){
+    if (upgradeGaugeAnimId) cancelAnimationFrame(upgradeGaugeAnimId);
+    var startChance = (upgradeDisplayedChance != null) ? upgradeDisplayedChance : targetChance;
+    var startTime = null;
+    var duration = 380;
+
+    function step(now){
+      if (startTime === null) startTime = now;
+      var t = Math.min(1, (now - startTime) / duration);
+      var eased = 1 - Math.pow(1 - t, 3); // плавное замедление к концу
+      var current = startChance + (targetChance - startChance) * eased;
+      renderUpgradeGaugeArc(current);
+      upgradeDisplayedChance = current;
+      if (t < 1) {
+        upgradeGaugeAnimId = requestAnimationFrame(step);
+      } else {
+        upgradeGaugeAnimId = null;
+        upgradeDisplayedChance = targetChance;
+      }
+    }
+    upgradeGaugeAnimId = requestAnimationFrame(step);
   }
 
   function upgradePlay(){
@@ -2166,7 +2222,7 @@
           finishUpgradeLocal(bet, chance);
           return;
         }
-        finishUpgrade(data.win, data.roll, data.multiplier, data.winnings, bet, data.balance, data.games_played, data.best_win);
+        finishUpgrade(data.win, data.roll, data.chance, data.multiplier, data.winnings, bet, data.balance, data.games_played, data.best_win);
       });
     } else {
       finishUpgradeLocal(bet, chance);
@@ -2181,13 +2237,13 @@
     var newBalance = state.balance + (winnings - bet);
     var newGames = state.games + 1;
     var newBest = Math.max(state.bestWin, winnings);
-    finishUpgrade(win, roll, mult, winnings, bet, newBalance, newGames, newBest);
+    finishUpgrade(win, roll, chance, mult, winnings, bet, newBalance, newGames, newBest);
   }
 
-  function finishUpgrade(win, roll, mult, winnings, bet, balance, gamesPlayed, bestWin){
+  function finishUpgrade(win, roll, chance, mult, winnings, bet, balance, gamesPlayed, bestWin){
     var SPIN_DURATION_MS = 3000;
     var extraSpins = 4 + Math.floor(Math.random() * 3); // 4-6 полных оборотов для одного цельного вращения
-    var targetAngle = (roll / 100) * 360 + 180;
+    var targetAngle = upgradeAngleForRoll(roll, chance);
     var current = upgradeRotation % 360;
     var delta = (targetAngle - current + 360) % 360;
     upgradeRotation += 360 * extraSpins + delta;
