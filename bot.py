@@ -1,4 +1,12 @@
 """
+Telegram-бот: профили пользователей + мини-игры казино (виртуальная валюта) + анимации.
+
+ВАЖНО:
+- Это ИГРОВАЯ механика с виртуальными очками, НЕ имеющими денежной стоимости
+  и не привязанными к реальным платежам или подаркам Telegram.
+- Никакого приёма реальных денег/подарков здесь нет и не должно быть.
+- Каждая игра — честный random(), с реальным шансом как выиграть, так и
+  проиграть ставку. Никаких "гарантированных" исходов.
 
 Игры:
 - 🎰 Рулетка       /roulette [ставка]
@@ -16,6 +24,7 @@
 - /games   — меню всех игр
 - /help    — список команд
 
+Хранилище: SQLite (файл bot_database.db), создаётся автоматически.
 
 Мини-приложение (index.html) синхронизировано с ботом: бот поднимает
 собственный HTTP-API (см. секцию "HTTP-API для мини-приложения" ниже)
@@ -103,7 +112,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -633,6 +642,19 @@ def get_all_user_ids() -> list:
         return [r[0] for r in rows]
 
 
+def get_leaderboard(order_by: str = "balance", limit: int = 10):
+    """Топ игроков по балансу или по лучшему одиночному выигрышу."""
+    column = "best_win" if order_by == "best_win" else "balance"
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT internal_id, first_name, username, balance, best_win, games_played "
+            f"FROM users WHERE banned = 0 ORDER BY {column} DESC, internal_id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return rows
+
+
 def set_ban(telegram_id: int, banned: bool, reason: str = None) -> None:
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
@@ -895,6 +917,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🚀 /crash [ставка], затем /cashout — множитель растёт, успей вывести до обрыва (макс. x{CRASH_MAX_MULTIPLIER:.0f})\n"
         f"💣 /mines [ставка] [3|5|8] — сетка 5×5, открывай клетки и забирай выигрыш вовремя\n\n"
         "🎟️ /promo КОД — активировать промокод\n"
+        "🏆 /top [выигрыш] — топ-10 игроков\n"
         "📩 /support текст — написать в поддержку (ответят прямо тут)\n\n"
         "ℹ️ Валюта в боте виртуальная, не имеет денежной ценности.\n"
         "В каждой игре есть реальный шанс проиграть ставку."
@@ -1265,6 +1288,28 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     await asyncio.sleep(0.2)
     await safe_edit(msg, f"{outcome}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
+
+
+async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/top [баланс|выигрыш] — топ-10 игроков."""
+    mode = "best_win" if context.args and context.args[0].lower() in ("выигрыш", "win", "best") else "balance"
+    rows = get_leaderboard(order_by=mode, limit=10)
+    if not rows:
+        await update.message.reply_text("Пока никто не играл — будь первым!")
+        return
+
+    title = "🏆 Топ-10 по лучшему выигрышу" if mode == "best_win" else "🏆 Топ-10 по балансу"
+    lines = [title, ""]
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(rows):
+        medal = medals[i] if i < 3 else f"{i + 1}."
+        name = row["first_name"] or (f"@{row['username']}" if row["username"] else f"Игрок #{row['internal_id']}")
+        value = row["best_win"] if mode == "best_win" else row["balance"]
+        lines.append(f"{medal} {name} — {value}")
+
+    lines.append("")
+    lines.append("Показать по выигрышу: /top выигрыш · по балансу: /top")
+    await update.message.reply_text("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -1838,6 +1883,37 @@ async def api_mines_cashout(request):
     return web.json_response(data, headers=_cors_headers())
 
 
+async def api_leaderboard(request):
+    """POST /api/leaderboard — топ-10 по балансу или лучшему выигрышу.
+    Авторизация не обязательна (рейтинг общий для всех), initData нужен
+    только чтобы подсветить строку самого игрока, если он в топе."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    mode = "best_win" if body.get("mode") == "best_win" else "balance"
+    rows = get_leaderboard(order_by=mode, limit=10)
+
+    my_id = None
+    tg_user = _auth_telegram_user(body)
+    if tg_user:
+        my_user = get_or_create_user(tg_user["id"], tg_user.get("username") or "", tg_user.get("first_name") or "")
+        my_id = my_user["internal_id"]
+
+    entries = [
+        {
+            "internalId": row["internal_id"],
+            "name": row["first_name"] or (f"@{row['username']}" if row["username"] else f"Игрок #{row['internal_id']}"),
+            "balance": row["balance"],
+            "bestWin": row["best_win"],
+            "gamesPlayed": row["games_played"],
+        }
+        for row in rows
+    ]
+    return web.json_response({"entries": entries, "myId": my_id}, headers=_cors_headers())
+
+
 def build_api_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/state", api_state)
@@ -1850,6 +1926,7 @@ def build_api_app() -> web.Application:
     app.router.add_post("/api/mines/start", api_mines_start)
     app.router.add_post("/api/mines/reveal", api_mines_reveal)
     app.router.add_post("/api/mines/cashout", api_mines_cashout)
+    app.router.add_post("/api/leaderboard", api_leaderboard)
     app.router.add_route("OPTIONS", "/api/state", _handle_options)
     app.router.add_route("OPTIONS", "/api/play", _handle_options)
     app.router.add_route("OPTIONS", "/api/promo", _handle_options)
@@ -1860,6 +1937,7 @@ def build_api_app() -> web.Application:
     app.router.add_route("OPTIONS", "/api/mines/start", _handle_options)
     app.router.add_route("OPTIONS", "/api/mines/reveal", _handle_options)
     app.router.add_route("OPTIONS", "/api/mines/cashout", _handle_options)
+    app.router.add_route("OPTIONS", "/api/leaderboard", _handle_options)
     return app
 
 
@@ -2424,6 +2502,7 @@ def main() -> None:
     application.add_handler(CommandHandler("coinflip", coinflip))
     application.add_handler(CommandHandler("blackred", blackred))
     application.add_handler(CommandHandler("upgrade", upgrade_cmd))
+    application.add_handler(CommandHandler("top", top_cmd))
     application.add_handler(CommandHandler("crash", crash_cmd))
     application.add_handler(CommandHandler("cashout", cashout_cmd))
     application.add_handler(CommandHandler("mines", mines_cmd))

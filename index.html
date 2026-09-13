@@ -20,6 +20,7 @@
     --pad: clamp(14px, 4vw, 28px);
     --maxw: 720px;
   }
+
   * { box-sizing: border-box; }
 
   html, body {
@@ -135,6 +136,111 @@
   }
   .sync-badge.live { color: var(--success); }
   .sync-badge.demo { color: var(--gold); }
+
+  .topbar-right { display: flex; align-items: center; gap: 8px; }
+  .settings-btn {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    background: var(--bg-2);
+    border: 1px solid transparent;
+    color: var(--text-1);
+    font-size: 15px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: border-color .15s ease, transform .1s ease;
+  }
+  .settings-btn:active { transform: scale(.9); }
+  .settings-btn:hover { border-color: var(--gold); }
+
+  .settings-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 40;
+    display: flex; align-items: center; justify-content: center;
+    padding: var(--pad);
+    animation: overlayFadeIn .2s ease;
+  }
+  @keyframes overlayFadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .settings-card {
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    border-radius: var(--radius);
+    padding: clamp(16px, 4.5vw, 24px);
+    width: 100%;
+    max-width: 360px;
+    animation: panelFadeIn .25s ease;
+  }
+  .settings-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: clamp(14px, 4vw, 18px);
+  }
+  .settings-close {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: var(--bg-2);
+    border: none;
+    color: var(--text-1);
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .settings-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0;
+  }
+  .settings-row-title { font-size: clamp(13px, 3.6vw, 15px); font-weight: 600; }
+  .settings-row-sub { font-size: clamp(11px, 2.8vw, 12px); color: var(--text-1); margin-top: 2px; }
+
+  .toggle-switch {
+    flex: 0 0 auto;
+    width: 46px; height: 26px;
+    border-radius: 20px;
+    background: var(--bg-2);
+    border: 1px solid transparent;
+    position: relative;
+    cursor: pointer;
+    transition: background .2s ease, border-color .2s ease;
+  }
+  .toggle-switch.on { background: rgba(232,184,75,0.25); border-color: var(--gold); }
+  .toggle-knob {
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: var(--text-1);
+    transition: transform .2s cubic-bezier(.34,1.4,.4,1), background .2s ease;
+  }
+  .toggle-switch.on .toggle-knob { transform: translateX(20px); background: var(--gold); }
+
+  .leaderboard-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 4px;
+    border-bottom: 1px solid var(--bg-2);
+  }
+  .leaderboard-row:last-child { border-bottom: none; }
+  .leaderboard-row.me { background: rgba(232,184,75,0.08); border-radius: 8px; }
+  .leaderboard-rank {
+    flex: 0 0 auto;
+    width: 26px;
+    text-align: center;
+    font-weight: 700;
+    font-size: clamp(13px, 3.4vw, 15px);
+    color: var(--text-1);
+  }
+  .leaderboard-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: clamp(12px, 3.4vw, 14px);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .leaderboard-value {
+    flex: 0 0 auto;
+    font-weight: 700;
+    color: var(--gold);
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(12px, 3.4vw, 14px);
+  }
+  .leaderboard-empty { text-align: center; color: var(--text-1); padding: 20px 0; font-size: 13px; }
 
   .balance-card {
     background: var(--bg-1);
@@ -699,7 +805,38 @@
         <div class="id-badge">ID <b id="profileId">—</b></div>
       </div>
     </div>
-    <div class="sync-badge" id="syncBadge">…</div>
+    <div class="topbar-right">
+      <div class="sync-badge" id="syncBadge">…</div>
+      <button class="settings-btn" id="leaderboardBtn" aria-label="Топ игроков">🏆</button>
+      <button class="settings-btn" id="settingsBtn" aria-label="Настройки">⚙️</button>
+    </div>
+  </div>
+
+  <div id="settingsOverlay" class="settings-overlay" style="display:none;">
+    <div class="settings-card">
+      <div class="settings-header">
+        <div class="section-title" style="margin:0;">Настройки</div>
+        <button class="settings-close" id="settingsCloseBtn" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-title">🔊 Звук</div>
+          <div class="settings-row-sub">Звуки выигрыша, проигрыша и вращения</div>
+        </div>
+        <button class="toggle-switch" id="soundToggle" role="switch" aria-checked="true"><span class="toggle-knob"></span></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="leaderboardOverlay" class="settings-overlay" style="display:none;">
+    <div class="settings-card">
+      <div class="settings-header">
+        <div class="section-title" style="margin:0;">🏆 Топ игроков</div>
+        <button class="settings-close" id="leaderboardCloseBtn" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="tabs" id="leaderboardTabs" style="margin-bottom:14px;"></div>
+      <div id="leaderboardList"></div>
+    </div>
   </div>
 
   <div class="balance-card">
@@ -812,6 +949,12 @@
   // Звук создаётся по требованию первого взаимодействия (браузеры не дают
   // запускать AudioContext до жеста пользователя).
   // ==========================================================================
+  var soundEnabled = true;
+  try {
+    var storedSound = localStorage.getItem("rc_sound_enabled");
+    if (storedSound !== null) soundEnabled = storedSound === "1";
+  } catch (e) {}
+
   var audioCtx = null;
   function getAudioCtx(){
     if (!audioCtx) {
@@ -841,6 +984,7 @@
   }
 
   function playWinSound(){
+    if (!soundEnabled) return;
     var ctx = getAudioCtx();
     if (!ctx) return;
     var t = ctx.currentTime;
@@ -850,6 +994,7 @@
   }
 
   function playLoseSound(){
+    if (!soundEnabled) return;
     var ctx = getAudioCtx();
     if (!ctx) return;
     var t = ctx.currentTime;
@@ -861,6 +1006,7 @@
   // как замедляющееся колесо. Используется в Апгрейде и Чёрном/красном.
   var spinSoundNode = null;
   function startSpinSound(durationSec){
+    if (!soundEnabled) return;
     var ctx = getAudioCtx();
     if (!ctx) return;
     stopSpinSound();
@@ -912,6 +1058,7 @@
   // фортуны. Все моменты щелчков считаются заранее и планируются через
   // точные тайминги Web Audio (а не setTimeout), поэтому ритм ровный.
   function startUpgradeClickSpin(durationSec){
+    if (!soundEnabled) return;
     var ctx = getAudioCtx();
     if (!ctx) return;
     var t0 = ctx.currentTime;
@@ -934,7 +1081,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -2429,6 +2576,93 @@
   document.getElementById("crashActionBtn").addEventListener("click", crashActionClick);
   document.getElementById("minesActionBtn").addEventListener("click", minesActionClick);
   document.getElementById("upgradeActionBtn").addEventListener("click", upgradePlay);
+
+  // ---------- Топ игроков ----------
+  var leaderboardMode = "balance";
+
+  function renderLeaderboardTabs(){
+    var wrap = document.getElementById("leaderboardTabs");
+    wrap.innerHTML = "";
+    [["balance", "По балансу"], ["best_win", "По выигрышу"]].forEach(function(pair){
+      var btn = document.createElement("div");
+      btn.className = "tab-btn" + (leaderboardMode === pair[0] ? " active" : "");
+      btn.textContent = pair[1];
+      btn.onclick = function(){
+        leaderboardMode = pair[0];
+        renderLeaderboardTabs();
+        loadLeaderboard();
+      };
+      wrap.appendChild(btn);
+    });
+  }
+
+  function loadLeaderboard(){
+    var list = document.getElementById("leaderboardList");
+    list.innerHTML = '<div class="leaderboard-empty">Загрузка...</div>';
+    if (!canUseApi()) {
+      list.innerHTML = '<div class="leaderboard-empty">Топ доступен только при открытии через бота</div>';
+      return;
+    }
+    apiCall("/api/leaderboard", { mode: leaderboardMode }, function(err, data){
+      if (err || !data || !data.entries) {
+        list.innerHTML = '<div class="leaderboard-empty">Не удалось загрузить</div>';
+        return;
+      }
+      if (data.entries.length === 0) {
+        list.innerHTML = '<div class="leaderboard-empty">Пока никто не играл — будь первым!</div>';
+        return;
+      }
+      var medals = ["🥇", "🥈", "🥉"];
+      list.innerHTML = "";
+      data.entries.forEach(function(entry, i){
+        var row = document.createElement("div");
+        row.className = "leaderboard-row" + (data.myId && entry.internalId === data.myId ? " me" : "");
+        var value = leaderboardMode === "best_win" ? entry.bestWin : entry.balance;
+        row.innerHTML =
+          '<div class="leaderboard-rank">' + (i < 3 ? medals[i] : (i + 1)) + '</div>' +
+          '<div class="leaderboard-name"></div>' +
+          '<div class="leaderboard-value">' + value + '</div>';
+        row.querySelector(".leaderboard-name").textContent = entry.name;
+        list.appendChild(row);
+      });
+    });
+  }
+
+  // ---------- Настройки ----------
+  function renderSoundToggle(){
+    var toggle = document.getElementById("soundToggle");
+    toggle.classList.toggle("on", soundEnabled);
+    toggle.setAttribute("aria-checked", soundEnabled ? "true" : "false");
+  }
+  renderSoundToggle();
+
+  document.getElementById("settingsBtn").addEventListener("click", function(){
+    document.getElementById("settingsOverlay").style.display = "flex";
+  });
+  document.getElementById("settingsCloseBtn").addEventListener("click", function(){
+    document.getElementById("settingsOverlay").style.display = "none";
+  });
+  document.getElementById("settingsOverlay").addEventListener("click", function(e){
+    if (e.target === this) this.style.display = "none";
+  });
+  document.getElementById("soundToggle").addEventListener("click", function(){
+    soundEnabled = !soundEnabled;
+    renderSoundToggle();
+    try { localStorage.setItem("rc_sound_enabled", soundEnabled ? "1" : "0"); } catch (e) {}
+    if (soundEnabled) playWinSound(); // короткий пример звука сразу при включении
+  });
+
+  renderLeaderboardTabs();
+  document.getElementById("leaderboardBtn").addEventListener("click", function(){
+    document.getElementById("leaderboardOverlay").style.display = "flex";
+    loadLeaderboard();
+  });
+  document.getElementById("leaderboardCloseBtn").addEventListener("click", function(){
+    document.getElementById("leaderboardOverlay").style.display = "none";
+  });
+  document.getElementById("leaderboardOverlay").addEventListener("click", function(e){
+    if (e.target === this) this.style.display = "none";
+  });
 
   loadState(function(){
     renderBalance(false);
