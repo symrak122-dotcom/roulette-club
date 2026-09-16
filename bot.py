@@ -92,6 +92,7 @@ PROXY_URL = os.getenv("BOT_PROXY_URL") or None
 # Пока не задан — кнопки мини-приложения просто не показываются, бот работает
 # как раньше через обычные команды.
 WEBAPP_URL = os.getenv("BOT_WEBAPP_URL") or None
+BOT_USERNAME = None  # заполняется при старте в post_init(), нужно для реферальных ссылок
 # Например: WEBAPP_URL = "https://твой-юзернейм.github.io/roulette-club/"
 
 # Порт, на котором бот поднимает свой HTTP-API для мини-приложения.
@@ -112,7 +113,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -228,7 +229,7 @@ crash_state = {
 }
 
 
-def finalize_round_payout(telegram_id: int, winnings: int):
+def finalize_round_payout(telegram_id: int, winnings: int, game: str = "unknown", bet: int = 0):
     """Начисляет выигрыш (0, если проиграл — ставка уже списана в момент
     входа в раунд) и обновляет статистику игр/рекорд, как settle()."""
     with closing(sqlite3.connect(DB_PATH)) as conn:
@@ -241,6 +242,7 @@ def finalize_round_payout(telegram_id: int, winnings: int):
         row = conn.execute(
             "SELECT balance, best_win FROM users WHERE telegram_id = ?", (telegram_id,)
         ).fetchone()
+        log_game_history(telegram_id, game, bet, winnings)
         return row[0], row[1]
 
 
@@ -294,7 +296,7 @@ def crash_cash_out(telegram_id: int):
         entry["cashed_out_at"] = mult
         bet = entry["bet"]
     winnings = int(bet * mult)
-    new_balance, best_win = finalize_round_payout(telegram_id, winnings)
+    new_balance, best_win = finalize_round_payout(telegram_id, winnings, game="crash", bet=bet)
     return True, "Выведено.", winnings, {"multiplier": mult, "balance": new_balance, "best_win": best_win, "bet": bet}
 
 
@@ -306,7 +308,7 @@ def _crash_settle_round_losses():
         bets = dict(crash_state["bets"])
     for telegram_id, entry in bets.items():
         if entry["cashed_out_at"] is None:
-            finalize_round_payout(telegram_id, 0)
+            finalize_round_payout(telegram_id, 0, game="crash", bet=entry["bet"])
 
 
 def crash_scheduler() -> None:
@@ -419,7 +421,7 @@ def mines_reveal(telegram_id: int, index: int):
                 session["active"] = False
 
     if hit_mine:
-        _, best_win = finalize_round_payout(telegram_id, 0)
+        _, best_win = finalize_round_payout(telegram_id, 0, game="mines", bet=bet)
         updated = get_user(telegram_id)
         return True, "hit", {
             "hit": True,
@@ -431,7 +433,7 @@ def mines_reveal(telegram_id: int, index: int):
 
     if auto_clear:
         winnings = int(bet * mult)
-        new_balance, best_win = finalize_round_payout(telegram_id, winnings)
+        new_balance, best_win = finalize_round_payout(telegram_id, winnings, game="mines", bet=bet)
         return True, "cleared", {
             "hit": False,
             "cleared": True,
@@ -457,7 +459,7 @@ def mines_cash_out(telegram_id: int):
         session["active"] = False
 
     winnings = int(bet * mult)
-    new_balance, best_win = finalize_round_payout(telegram_id, winnings)
+    new_balance, best_win = finalize_round_payout(telegram_id, winnings, game="mines", bet=bet)
     return True, "Выведено.", {
         "multiplier": mult,
         "winnings": winnings,
@@ -540,6 +542,12 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN last_daily_claim TEXT")
         if "daily_streak" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN daily_streak INTEGER NOT NULL DEFAULT 0")
+        if "referred_by" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        if "referral_count" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN referral_count INTEGER NOT NULL DEFAULT 0")
+        if "referral_earnings" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN referral_earnings INTEGER NOT NULL DEFAULT 0")
 
         conn.execute(
             """
@@ -562,6 +570,22 @@ def init_db() -> None:
                 PRIMARY KEY (code, telegram_id)
             )
             """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS game_history (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                game        TEXT NOT NULL,
+                bet         INTEGER NOT NULL,
+                winnings    INTEGER NOT NULL,
+                delta       INTEGER NOT NULL,
+                created_at  TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_game_history_user ON game_history(telegram_id, id DESC)"
         )
         conn.commit()
 
@@ -644,6 +668,47 @@ def get_all_user_ids() -> list:
     with closing(sqlite3.connect(DB_PATH)) as conn:
         rows = conn.execute("SELECT telegram_id FROM users").fetchall()
         return [r[0] for r in rows]
+
+
+# --- Реферальная система: приглашающий и приглашённый получают бонус,
+# но только один раз при первой регистрации приглашённого. ---
+REFERRAL_BONUS_REFERRER = 50
+REFERRAL_BONUS_REFERRED = 30
+
+
+def process_referral(new_user_telegram_id: int, referrer_telegram_id: int):
+    """Начисляет бонусы за реферала, если оба условия соблюдены: новый
+    пользователь ещё не привязан ни к кому и не пытается пригласить
+    сам себя. Возвращает True, если бонус был начислен."""
+    if new_user_telegram_id == referrer_telegram_id:
+        return False
+    referrer = get_user(referrer_telegram_id)
+    if referrer is None:
+        return False
+
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT referred_by FROM users WHERE telegram_id = ?", (new_user_telegram_id,)
+        ).fetchone()
+        if row is None or row["referred_by"] is not None:
+            return False  # уже привязан или не найден — бонус не начисляем повторно
+
+        conn.execute(
+            "UPDATE users SET referred_by = ? WHERE telegram_id = ?",
+            (referrer_telegram_id, new_user_telegram_id),
+        )
+        conn.execute(
+            "UPDATE users SET balance = balance + ? WHERE telegram_id = ?",
+            (REFERRAL_BONUS_REFERRED, new_user_telegram_id),
+        )
+        conn.execute(
+            "UPDATE users SET balance = balance + ?, referral_count = referral_count + 1, "
+            "referral_earnings = referral_earnings + ? WHERE telegram_id = ?",
+            (REFERRAL_BONUS_REFERRER, REFERRAL_BONUS_REFERRER, referrer_telegram_id),
+        )
+        conn.commit()
+    return True
 
 
 def get_leaderboard(order_by: str = "balance", limit: int = 10):
@@ -874,7 +939,35 @@ async def check_not_banned(update: Update, telegram_id: int) -> bool:
     return True
 
 
-def settle(telegram_id: int, bet: int, winnings: int):
+def log_game_history(telegram_id: int, game: str, bet: int, winnings: int) -> None:
+    """Записывает раунд в историю ставок и подчищает старые записи, чтобы
+    таблица не росла бесконечно (храним последние 200 на игрока)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "INSERT INTO game_history (telegram_id, game, bet, winnings, delta, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (telegram_id, game, bet, winnings, winnings - bet, now),
+        )
+        conn.execute(
+            "DELETE FROM game_history WHERE telegram_id = ? AND id NOT IN ("
+            "SELECT id FROM game_history WHERE telegram_id = ? ORDER BY id DESC LIMIT 200)",
+            (telegram_id, telegram_id),
+        )
+        conn.commit()
+
+
+def get_game_history(telegram_id: int, limit: int = 20):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            "SELECT game, bet, winnings, delta, created_at FROM game_history "
+            "WHERE telegram_id = ? ORDER BY id DESC LIMIT ?",
+            (telegram_id, limit),
+        ).fetchall()
+
+
+def settle(telegram_id: int, bet: int, winnings: int, game: str = "unknown"):
     delta = winnings - bet
     new_balance = update_balance(telegram_id, delta)
     if winnings > 0:
@@ -884,6 +977,7 @@ def settle(telegram_id: int, bet: int, winnings: int):
                 (winnings, telegram_id, winnings),
             )
             conn.commit()
+    log_game_history(telegram_id, game, bet, winnings)
     return new_balance, delta
 
 
@@ -893,7 +987,27 @@ def settle(telegram_id: int, bet: int, winnings: int):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_user = update.effective_user
+    was_new = get_user(tg_user.id) is None
     user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+
+    referral_bonus_msg = ""
+    if was_new and context.args:
+        payload = context.args[0]
+        if payload.startswith("ref"):
+            try:
+                referrer_id = int(payload[3:])
+                if process_referral(tg_user.id, referrer_id):
+                    referral_bonus_msg = f"\n\n🎉 Ты пришёл по приглашению — держи бонус +{REFERRAL_BONUS_REFERRED}!"
+                    user = get_user(tg_user.id)
+                    try:
+                        await context.bot.send_message(
+                            chat_id=referrer_id,
+                            text=f"🤝 По твоей ссылке зарегистрировался новый игрок! Бонус: +{REFERRAL_BONUS_REFERRER}",
+                        )
+                    except Exception:
+                        pass
+            except ValueError:
+                pass
 
     frames = [
         "⏳ Загрузка········ 10%",
@@ -914,7 +1028,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Добро пожаловать, {tg_user.first_name}!\n\n"
         f"🆔 Твой ID в системе: <b>{user['internal_id']}</b>\n"
         f"💰 Баланс: <b>{user['balance']}</b> очков\n\n"
-        "Набери /games, чтобы увидеть все игры, или /help для списка команд.",
+        "Набери /games, чтобы увидеть все игры, или /help для списка команд."
+        f"{referral_bonus_msg}",
         parse_mode="HTML",
     )
     await update.message.reply_text("Меню игр:", reply_markup=games_keyboard())
@@ -1000,6 +1115,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🎟️ /promo КОД — активировать промокод\n"
         "🏆 /top [выигрыш] — топ-10 игроков\n"
         f"🎁 /daily — ежедневный бонус (от {DAILY_BASE_REWARD + DAILY_STREAK_STEP} очков, растёт с серией дней)\n"
+        "📜 /history — последние 15 ставок\n"
+        f"🤝 /ref — реферальная ссылка (+{REFERRAL_BONUS_REFERRER} тебе, +{REFERRAL_BONUS_REFERRED} другу)\n"
         "📩 /support текст — написать в поддержку (ответят прямо тут)\n\n"
         "ℹ️ Валюта в боте виртуальная, не имеет денежной ценности.\n"
         "В каждой игре есть реальный шанс проиграть ставку."
@@ -1069,7 +1186,7 @@ async def roulette(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_edit(msg, f"🎰 Ставка: {bet}\n\n[ {final_a} {final_b} {final_c} ]")
 
     winnings = int(bet * multiplier)
-    new_balance, delta = settle(tg_user.id, bet, winnings)
+    new_balance, delta = settle(tg_user.id, bet, winnings, game="roulette")
 
     if multiplier == 0:
         outcome_text = f"😔 <b>{result_name}</b>\nТы проиграл {bet} очков."
@@ -1133,7 +1250,7 @@ async def dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     win = result == guess
     winnings = int(bet * DICE_WIN_MULTIPLIER) if win else 0
-    new_balance, delta = settle(tg_user.id, bet, winnings)
+    new_balance, delta = settle(tg_user.id, bet, winnings, game="dice")
 
     if win:
         outcome = f"🎉 Угадал! Выпало {result}.\nВыигрыш: +{winnings} (x{DICE_WIN_MULTIPLIER})"
@@ -1187,7 +1304,7 @@ async def slots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         winnings = 0
         outcome = f"😔 Ничего не совпало.\nПроигрыш: -{bet}"
 
-    new_balance, delta = settle(tg_user.id, bet, winnings)
+    new_balance, delta = settle(tg_user.id, bet, winnings, game="slots")
     await asyncio.sleep(0.3)
     await safe_edit(msg, f"{outcome}\n\n💰 Новый баланс: <b>{new_balance}</b>", parse_mode="HTML")
 
@@ -1236,7 +1353,7 @@ async def coinflip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = random.choice(["орёл", "решка"])
     win = result == choice
     winnings = int(bet * COINFLIP_WIN_MULTIPLIER) if win else 0
-    new_balance, delta = settle(tg_user.id, bet, winnings)
+    new_balance, delta = settle(tg_user.id, bet, winnings, game="coinflip")
 
     symbol = "🦅" if result == "орёл" else "🔵"
     await asyncio.sleep(0.3)
@@ -1313,7 +1430,7 @@ async def blackred(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     win = result == choice
     winnings = int(bet * BLACKRED_WIN_MULTIPLIER) if win else 0
-    new_balance, delta = settle(tg_user.id, bet, winnings)
+    new_balance, delta = settle(tg_user.id, bet, winnings, game="blackred")
 
     if win:
         outcome = f"🎉 Выпало {result_symbol} {result_label}!\nВыигрыш: +{winnings} (x{BLACKRED_WIN_MULTIPLIER})"
@@ -1361,7 +1478,7 @@ async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     roll = random.uniform(0, 100)
     win = roll < chance
     winnings = int(bet * mult) if win else 0
-    new_balance, delta = settle(tg_user.id, bet, winnings)
+    new_balance, delta = settle(tg_user.id, bet, winnings, game="upgrade")
 
     if win:
         outcome = f"🎉 Выпало {roll:.1f}% — попал в зону {chance:g}%!\nВыигрыш: +{winnings} (x{mult})"
@@ -1413,8 +1530,46 @@ async def daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# 🚀 Краш — общий раунд для бота и мини-приложения (см. crash_scheduler)
+GAME_NAMES_RU = {
+    "roulette": "🎰 Рулетка", "dice": "🎲 Кости", "slots": "🎯 Слоты",
+    "coinflip": "🪙 Монетка", "blackred": "🔴⚫ Ч/К", "crash": "🚀 Краш",
+    "mines": "💣 Мины", "upgrade": "⬆️ Апгрейд",
+}
+
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/history — последние 15 ставок."""
+    tg_user = update.effective_user
+    rows = get_game_history(tg_user.id, limit=15)
+    if not rows:
+        await update.message.reply_text("Пока нет ни одной сыгранной ставки.")
+        return
+
+    lines = ["📜 Последние ставки:", ""]
+    for row in rows:
+        name = GAME_NAMES_RU.get(row["game"], row["game"])
+        sign = "+" if row["delta"] >= 0 else ""
+        lines.append(f"{name} — ставка {row['bet']}, {sign}{row['delta']}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def ref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ref — реферальная ссылка и статистика приглашений."""
+    tg_user = update.effective_user
+    user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    bot_username = context.bot.username
+    link = f"https://t.me/{bot_username}?start=ref{tg_user.id}"
+
+    await update.message.reply_text(
+        f"🤝 Приглашай друзей и получай бонусы!\n\n"
+        f"Ты получаешь: +{REFERRAL_BONUS_REFERRER} за каждого друга\n"
+        f"Друг получает: +{REFERRAL_BONUS_REFERRED} при первом запуске\n\n"
+        f"🔗 Твоя ссылка:\n{link}\n\n"
+        f"👥 Приглашено: {user['referral_count']}\n"
+        f"💰 Заработано на рефералах: {user['referral_earnings']}"
+    )
+
+
 # ---------------------------------------------------------------------------
 
 async def crash_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1726,7 +1881,7 @@ async def api_play(request):
     else:
         return web.json_response({"error": "unknown_game"}, status=400, headers=_cors_headers())
 
-    new_balance, delta = settle(telegram_id, bet, winnings)
+    new_balance, delta = settle(telegram_id, bet, winnings, game=game)
     updated = get_user(telegram_id)
     payload.update(
         {
@@ -2076,6 +2231,56 @@ async def api_daily_claim(request):
     )
 
 
+async def api_history(request):
+    """POST /api/history — последние ставки пользователя."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    rows = get_game_history(tg_user["id"], limit=30)
+    entries = [
+        {
+            "game": row["game"],
+            "bet": row["bet"],
+            "winnings": row["winnings"],
+            "delta": row["delta"],
+            "createdAt": row["created_at"],
+        }
+        for row in rows
+    ]
+    return web.json_response({"entries": entries}, headers=_cors_headers())
+
+
+async def api_referral(request):
+    """POST /api/referral — реферальная ссылка и статистика приглашений."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    user = get_or_create_user(tg_user["id"], tg_user.get("username") or "", tg_user.get("first_name") or "")
+    link = f"https://t.me/{BOT_USERNAME}?start=ref{tg_user['id']}" if BOT_USERNAME else None
+    return web.json_response(
+        {
+            "link": link,
+            "referralCount": user["referral_count"],
+            "referralEarnings": user["referral_earnings"],
+            "bonusReferrer": REFERRAL_BONUS_REFERRER,
+            "bonusReferred": REFERRAL_BONUS_REFERRED,
+        },
+        headers=_cors_headers(),
+    )
+
+
 def build_api_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/state", api_state)
@@ -2091,6 +2296,8 @@ def build_api_app() -> web.Application:
     app.router.add_post("/api/leaderboard", api_leaderboard)
     app.router.add_post("/api/daily/state", api_daily_state)
     app.router.add_post("/api/daily/claim", api_daily_claim)
+    app.router.add_post("/api/history", api_history)
+    app.router.add_post("/api/referral", api_referral)
     app.router.add_route("OPTIONS", "/api/state", _handle_options)
     app.router.add_route("OPTIONS", "/api/play", _handle_options)
     app.router.add_route("OPTIONS", "/api/promo", _handle_options)
@@ -2104,6 +2311,8 @@ def build_api_app() -> web.Application:
     app.router.add_route("OPTIONS", "/api/leaderboard", _handle_options)
     app.router.add_route("OPTIONS", "/api/daily/state", _handle_options)
     app.router.add_route("OPTIONS", "/api/daily/claim", _handle_options)
+    app.router.add_route("OPTIONS", "/api/history", _handle_options)
+    app.router.add_route("OPTIONS", "/api/referral", _handle_options)
     return app
 
 
@@ -2624,6 +2833,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def post_init(application) -> None:
     """Выполняется один раз при старте: ставит системную Menu Button
     (кнопка рядом со скрепкой ввода), открывающую мини-приложение."""
+    global BOT_USERNAME
+    try:
+        me = await application.bot.get_me()
+        BOT_USERNAME = me.username
+    except Exception as e:
+        logger.warning("Не удалось получить username бота: %s", e)
+
     if not WEBAPP_URL:
         return
     try:
@@ -2670,6 +2886,8 @@ def main() -> None:
     application.add_handler(CommandHandler("upgrade", upgrade_cmd))
     application.add_handler(CommandHandler("top", top_cmd))
     application.add_handler(CommandHandler("daily", daily_cmd))
+    application.add_handler(CommandHandler("history", history_cmd))
+    application.add_handler(CommandHandler("ref", ref_cmd))
     application.add_handler(CommandHandler("crash", crash_cmd))
     application.add_handler(CommandHandler("cashout", cashout_cmd))
     application.add_handler(CommandHandler("mines", mines_cmd))

@@ -263,6 +263,32 @@
     margin-top: 10px;
   }
 
+  .settings-row-click { cursor: pointer; transition: background .15s ease; border-radius: 8px; }
+  .settings-row-click:active { background: var(--bg-2); }
+  .settings-row-arrow { color: var(--text-1); font-size: 20px; flex: 0 0 auto; }
+
+  .history-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 4px;
+    border-bottom: 1px solid var(--bg-2);
+    gap: 10px;
+  }
+  .history-row:last-child { border-bottom: none; }
+  .history-game { font-size: clamp(12px, 3.4vw, 14px); flex: 1 1 auto; min-width: 0; }
+  .history-bet { font-size: clamp(11px, 2.8vw, 12px); color: var(--text-1); }
+  .history-delta { font-weight: 700; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+  .history-delta.win { color: var(--success); }
+  .history-delta.lose { color: var(--danger); }
+
+  .referral-link-box {
+    background: var(--bg-2);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: clamp(11px, 2.8vw, 13px);
+    color: var(--text-1);
+    word-break: break-all;
+  }
+
   .balance-card {
     background: var(--bg-1);
     border: 1px solid var(--bg-2);
@@ -849,6 +875,53 @@
         </div>
         <button class="toggle-switch" id="soundToggle" role="switch" aria-checked="true"><span class="toggle-knob"></span></button>
       </div>
+      <div class="settings-row settings-row-click" id="openHistoryRow">
+        <div>
+          <div class="settings-row-title">📜 История ставок</div>
+          <div class="settings-row-sub">Последние сыгранные раунды</div>
+        </div>
+        <div class="settings-row-arrow">›</div>
+      </div>
+      <div class="settings-row settings-row-click" id="openReferralRow">
+        <div>
+          <div class="settings-row-title">🤝 Пригласить друга</div>
+          <div class="settings-row-sub">Бонус тебе и другу за приглашение</div>
+        </div>
+        <div class="settings-row-arrow">›</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="historyOverlay" class="settings-overlay" style="display:none;">
+    <div class="settings-card">
+      <div class="settings-header">
+        <div class="section-title" style="margin:0;">📜 История ставок</div>
+        <button class="settings-close" id="historyCloseBtn" aria-label="Закрыть">✕</button>
+      </div>
+      <div id="historyList"></div>
+    </div>
+  </div>
+
+  <div id="referralOverlay" class="settings-overlay" style="display:none;">
+    <div class="settings-card" style="text-align:center;">
+      <div class="settings-header">
+        <div class="section-title" style="margin:0;">🤝 Пригласи друга</div>
+        <button class="settings-close" id="referralCloseBtn" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="footnote" style="margin:0 0 14px;" id="referralExplain">Загрузка...</div>
+      <div class="referral-link-box" id="referralLinkBox"></div>
+      <button class="spin-btn" id="referralCopyBtn" style="margin-top:12px;">Скопировать ссылку</button>
+      <div class="stats-grid" style="margin-top:16px;">
+        <div class="stat">
+          <div class="stat-num" id="referralCountLabel">0</div>
+          <div class="stat-cap">Приглашено</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num" id="referralEarningsLabel">0</div>
+          <div class="stat-cap">Заработано</div>
+        </div>
+      </div>
+      <div class="result-msg" id="referralMsg"></div>
     </div>
   </div>
 
@@ -1118,7 +1191,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -2734,6 +2807,84 @@
   }
   var DAILY_COOLDOWN_SECONDS_FALLBACK = 24 * 3600;
 
+  // ---------- История ставок ----------
+  var GAME_NAMES_RU = {
+    roulette: "🎰 Рулетка", dice: "🎲 Кости", slots: "🎯 Слоты",
+    coinflip: "🪙 Монетка", blackred: "🔴⚫ Ч/К", crash: "🚀 Краш",
+    mines: "💣 Мины", upgrade: "⬆️ Апгрейд"
+  };
+
+  function loadHistory(){
+    var list = document.getElementById("historyList");
+    list.innerHTML = '<div class="leaderboard-empty">Загрузка...</div>';
+    if (!canUseApi()) {
+      list.innerHTML = '<div class="leaderboard-empty">История доступна только при открытии через бота</div>';
+      return;
+    }
+    apiCall("/api/history", {}, function(err, data){
+      if (err || !data || !data.entries) {
+        list.innerHTML = '<div class="leaderboard-empty">Не удалось загрузить</div>';
+        return;
+      }
+      if (data.entries.length === 0) {
+        list.innerHTML = '<div class="leaderboard-empty">Пока нет ни одной ставки</div>';
+        return;
+      }
+      list.innerHTML = "";
+      data.entries.forEach(function(e){
+        var row = document.createElement("div");
+        row.className = "history-row";
+        var sign = e.delta >= 0 ? "+" : "";
+        row.innerHTML =
+          '<div class="history-game">' + (GAME_NAMES_RU[e.game] || e.game) + '<div class="history-bet">ставка ' + e.bet + '</div></div>' +
+          '<div class="history-delta ' + (e.delta >= 0 ? "win" : "lose") + '">' + sign + e.delta + '</div>';
+        list.appendChild(row);
+      });
+    });
+  }
+
+  // ---------- Реферальная система ----------
+  function loadReferral(){
+    var explain = document.getElementById("referralExplain");
+    var linkBox = document.getElementById("referralLinkBox");
+    explain.textContent = "Загрузка...";
+    linkBox.textContent = "";
+    if (!canUseApi()) {
+      explain.textContent = "Доступно только при открытии через бота";
+      return;
+    }
+    apiCall("/api/referral", {}, function(err, data){
+      if (err || !data) {
+        explain.textContent = "Не удалось загрузить";
+        return;
+      }
+      explain.textContent = "Ты получаешь +" + data.bonusReferrer + " за каждого друга, друг получает +" + data.bonusReferred + " при первом запуске.";
+      linkBox.textContent = data.link || "Ссылка недоступна";
+      document.getElementById("referralCountLabel").textContent = data.referralCount;
+      document.getElementById("referralEarningsLabel").textContent = data.referralEarnings;
+      referralLink = data.link;
+    });
+  }
+  var referralLink = null;
+
+  function copyReferralLink(){
+    var msg = document.getElementById("referralMsg");
+    if (!referralLink) return;
+    var done = function(){
+      msg.className = "result-msg win";
+      msg.textContent = "Ссылка скопирована!";
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(referralLink).then(done).catch(function(){
+        msg.className = "result-msg lose";
+        msg.textContent = "Не удалось скопировать — скопируй вручную";
+      });
+    } else {
+      msg.className = "result-msg lose";
+      msg.textContent = "Скопируй ссылку вручную";
+    }
+  }
+
   // ---------- Настройки ----------
   function renderSoundToggle(){
     var toggle = document.getElementById("soundToggle");
@@ -2778,6 +2929,31 @@
     if (e.target === this) this.style.display = "none";
   });
   document.getElementById("dailyClaimBtn").addEventListener("click", claimDaily);
+
+  document.getElementById("openHistoryRow").addEventListener("click", function(){
+    document.getElementById("settingsOverlay").style.display = "none";
+    document.getElementById("historyOverlay").style.display = "flex";
+    loadHistory();
+  });
+  document.getElementById("historyCloseBtn").addEventListener("click", function(){
+    document.getElementById("historyOverlay").style.display = "none";
+  });
+  document.getElementById("historyOverlay").addEventListener("click", function(e){
+    if (e.target === this) this.style.display = "none";
+  });
+
+  document.getElementById("openReferralRow").addEventListener("click", function(){
+    document.getElementById("settingsOverlay").style.display = "none";
+    document.getElementById("referralOverlay").style.display = "flex";
+    loadReferral();
+  });
+  document.getElementById("referralCloseBtn").addEventListener("click", function(){
+    document.getElementById("referralOverlay").style.display = "none";
+  });
+  document.getElementById("referralOverlay").addEventListener("click", function(e){
+    if (e.target === this) this.style.display = "none";
+  });
+  document.getElementById("referralCopyBtn").addEventListener("click", copyReferralLink);
 
   loadState(function(){
     renderBalance(false);
