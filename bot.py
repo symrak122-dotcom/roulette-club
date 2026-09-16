@@ -112,7 +112,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -536,6 +536,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN warnings INTEGER NOT NULL DEFAULT 0")
         if "best_win" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN best_win INTEGER NOT NULL DEFAULT 0")
+        if "last_daily_claim" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN last_daily_claim TEXT")
+        if "daily_streak" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN daily_streak INTEGER NOT NULL DEFAULT 0")
 
         conn.execute(
             """
@@ -653,6 +657,83 @@ def get_leaderboard(order_by: str = "balance", limit: int = 10):
             (limit,),
         ).fetchall()
         return rows
+
+
+# --- Ежедневный бонус: раз в 24 часа, с растущей наградой за серию дней
+# подряд. Если пропустить больше 48 часов — серия сбрасывается. ---
+DAILY_BASE_REWARD = 20
+DAILY_STREAK_STEP = 5
+DAILY_MAX_STREAK_DAYS = 10  # после 10-го дня подряд награда больше не растёт
+DAILY_COOLDOWN_HOURS = 24
+DAILY_STREAK_GRACE_HOURS = 48
+
+
+def daily_reward_for_streak(streak: int) -> int:
+    capped = min(max(streak, 1), DAILY_MAX_STREAK_DAYS)
+    return DAILY_BASE_REWARD + capped * DAILY_STREAK_STEP
+
+
+def get_daily_status(telegram_id: int):
+    """Текущее состояние ежедневного бонуса без его получения: можно ли
+    забрать сейчас, сколько осталось ждать, текущая серия."""
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT last_daily_claim, daily_streak FROM users WHERE telegram_id = ?", (telegram_id,)
+        ).fetchone()
+    if row is None:
+        return {"can_claim": True, "seconds_remaining": 0, "streak": 0, "next_amount": daily_reward_for_streak(1)}
+
+    now = datetime.now(timezone.utc)
+    streak = row["daily_streak"] or 0
+    can_claim = True
+    seconds_remaining = 0
+
+    if row["last_daily_claim"]:
+        last_claim = datetime.fromisoformat(row["last_daily_claim"])
+        elapsed_hours = (now - last_claim).total_seconds() / 3600
+        if elapsed_hours < DAILY_COOLDOWN_HOURS:
+            can_claim = False
+            seconds_remaining = int((DAILY_COOLDOWN_HOURS - elapsed_hours) * 3600)
+        if elapsed_hours > DAILY_STREAK_GRACE_HOURS:
+            streak = 0
+
+    next_amount = daily_reward_for_streak(streak + 1 if can_claim else streak)
+    return {"can_claim": can_claim, "seconds_remaining": seconds_remaining, "streak": streak, "next_amount": next_amount}
+
+
+def claim_daily_bonus(telegram_id: int):
+    """Пытается выдать ежедневный бонус. Возвращает (успех, сообщение,
+    сумма, новая_серия)."""
+    now = datetime.now(timezone.utc)
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT last_daily_claim, daily_streak FROM users WHERE telegram_id = ?", (telegram_id,)
+        ).fetchone()
+        if row is None:
+            return False, "Профиль не найден.", 0, 0
+
+        streak = row["daily_streak"] or 0
+        if row["last_daily_claim"]:
+            last_claim = datetime.fromisoformat(row["last_daily_claim"])
+            elapsed_hours = (now - last_claim).total_seconds() / 3600
+            if elapsed_hours < DAILY_COOLDOWN_HOURS:
+                remaining = DAILY_COOLDOWN_HOURS - elapsed_hours
+                h, m = int(remaining), int((remaining - int(remaining)) * 60)
+                return False, f"Уже забрал сегодня. Приходи через {h} ч {m} мин.", 0, streak
+            if elapsed_hours > DAILY_STREAK_GRACE_HOURS:
+                streak = 0
+
+        streak += 1
+        amount = daily_reward_for_streak(streak)
+        conn.execute(
+            "UPDATE users SET balance = balance + ?, last_daily_claim = ?, daily_streak = ? WHERE telegram_id = ?",
+            (amount, now.isoformat(), streak, telegram_id),
+        )
+        conn.commit()
+
+    return True, "Бонус получен!", amount, streak
 
 
 def set_ban(telegram_id: int, banned: bool, reason: str = None) -> None:
@@ -918,6 +999,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"💣 /mines [ставка] [3|5|8] — сетка 5×5, открывай клетки и забирай выигрыш вовремя\n\n"
         "🎟️ /promo КОД — активировать промокод\n"
         "🏆 /top [выигрыш] — топ-10 игроков\n"
+        f"🎁 /daily — ежедневный бонус (от {DAILY_BASE_REWARD + DAILY_STREAK_STEP} очков, растёт с серией дней)\n"
         "📩 /support текст — написать в поддержку (ответят прямо тут)\n\n"
         "ℹ️ Валюта в боте виртуальная, не имеет денежной ценности.\n"
         "В каждой игре есть реальный шанс проиграть ставку."
@@ -1310,6 +1392,25 @@ async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines.append("")
     lines.append("Показать по выигрышу: /top выигрыш · по балансу: /top")
     await update.message.reply_text("\n".join(lines))
+
+
+async def daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/daily — забрать ежедневный бонус. Награда растёт с серией дней
+    подряд, но сбрасывается, если пропустить больше 2 суток."""
+    tg_user = update.effective_user
+    get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    if not await check_not_banned(update, tg_user.id):
+        return
+
+    success, message, amount, streak = claim_daily_bonus(tg_user.id)
+    if not success:
+        await update.message.reply_text(f"⏳ {message}")
+        return
+
+    updated = get_user(tg_user.id)
+    await update.message.reply_text(
+        f"🎁 {message}\n+{amount} очков (серия: {streak} дн. подряд)\n💰 Баланс: {updated['balance']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1914,6 +2015,67 @@ async def api_leaderboard(request):
     return web.json_response({"entries": entries, "myId": my_id}, headers=_cors_headers())
 
 
+async def api_daily_state(request):
+    """POST /api/daily/state — можно ли забрать бонус сейчас, сколько
+    ждать, текущая серия и сумма следующей награды."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    get_or_create_user(tg_user["id"], tg_user.get("username") or "", tg_user.get("first_name") or "")
+    status = get_daily_status(tg_user["id"])
+    return web.json_response(
+        {
+            "canClaim": status["can_claim"],
+            "secondsRemaining": status["seconds_remaining"],
+            "streak": status["streak"],
+            "nextAmount": status["next_amount"],
+        },
+        headers=_cors_headers(),
+    )
+
+
+async def api_daily_claim(request):
+    """POST /api/daily/claim — забрать ежедневный бонус."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_request"}, status=400, headers=_cors_headers())
+
+    tg_user = _auth_telegram_user(body)
+    if not tg_user:
+        return web.json_response({"error": "unauthorized"}, status=401, headers=_cors_headers())
+
+    user = get_or_create_user(tg_user["id"], tg_user.get("username") or "", tg_user.get("first_name") or "")
+    if user["banned"]:
+        return web.json_response(
+            {"error": "banned", "reason": user["ban_reason"] or "без указания причины"},
+            status=403, headers=_cors_headers(),
+        )
+
+    success, message, amount, streak = claim_daily_bonus(tg_user["id"])
+    if not success:
+        return web.json_response({"error": "cooldown", "message": message}, status=400, headers=_cors_headers())
+
+    updated = get_user(tg_user["id"])
+    return web.json_response(
+        {
+            "success": True,
+            "amount": amount,
+            "streak": streak,
+            "balance": updated["balance"],
+            "games_played": updated["games_played"],
+            "best_win": updated["best_win"],
+        },
+        headers=_cors_headers(),
+    )
+
+
 def build_api_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/api/state", api_state)
@@ -1927,6 +2089,8 @@ def build_api_app() -> web.Application:
     app.router.add_post("/api/mines/reveal", api_mines_reveal)
     app.router.add_post("/api/mines/cashout", api_mines_cashout)
     app.router.add_post("/api/leaderboard", api_leaderboard)
+    app.router.add_post("/api/daily/state", api_daily_state)
+    app.router.add_post("/api/daily/claim", api_daily_claim)
     app.router.add_route("OPTIONS", "/api/state", _handle_options)
     app.router.add_route("OPTIONS", "/api/play", _handle_options)
     app.router.add_route("OPTIONS", "/api/promo", _handle_options)
@@ -1938,6 +2102,8 @@ def build_api_app() -> web.Application:
     app.router.add_route("OPTIONS", "/api/mines/reveal", _handle_options)
     app.router.add_route("OPTIONS", "/api/mines/cashout", _handle_options)
     app.router.add_route("OPTIONS", "/api/leaderboard", _handle_options)
+    app.router.add_route("OPTIONS", "/api/daily/state", _handle_options)
+    app.router.add_route("OPTIONS", "/api/daily/claim", _handle_options)
     return app
 
 
@@ -2503,6 +2669,7 @@ def main() -> None:
     application.add_handler(CommandHandler("blackred", blackred))
     application.add_handler(CommandHandler("upgrade", upgrade_cmd))
     application.add_handler(CommandHandler("top", top_cmd))
+    application.add_handler(CommandHandler("daily", daily_cmd))
     application.add_handler(CommandHandler("crash", crash_cmd))
     application.add_handler(CommandHandler("cashout", cashout_cmd))
     application.add_handler(CommandHandler("mines", mines_cmd))

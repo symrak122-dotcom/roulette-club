@@ -242,6 +242,27 @@
   }
   .leaderboard-empty { text-align: center; color: var(--text-1); padding: 20px 0; font-size: 13px; }
 
+  .daily-dot {
+    position: absolute;
+    top: 3px; right: 3px;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--gold);
+    box-shadow: 0 0 6px rgba(232,184,75,0.8);
+    animation: dailyDotPulse 1.4s ease-in-out infinite;
+  }
+  @keyframes dailyDotPulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.3); opacity: .6; }
+  }
+  .daily-streak { color: var(--text-1); font-size: clamp(12px, 3.2vw, 14px); margin-top: 4px; }
+  .daily-amount {
+    font-size: clamp(32px, 10vw, 46px);
+    font-weight: 800;
+    color: var(--gold);
+    margin-top: 10px;
+  }
+
   .balance-card {
     background: var(--bg-1);
     border: 1px solid var(--bg-2);
@@ -807,6 +828,9 @@
     </div>
     <div class="topbar-right">
       <div class="sync-badge" id="syncBadge">…</div>
+      <button class="settings-btn" id="dailyBtn" aria-label="Ежедневный бонус" style="position:relative;">
+        🎁<span class="daily-dot" id="dailyDot" style="display:none;"></span>
+      </button>
       <button class="settings-btn" id="leaderboardBtn" aria-label="Топ игроков">🏆</button>
       <button class="settings-btn" id="settingsBtn" aria-label="Настройки">⚙️</button>
     </div>
@@ -836,6 +860,19 @@
       </div>
       <div class="tabs" id="leaderboardTabs" style="margin-bottom:14px;"></div>
       <div id="leaderboardList"></div>
+    </div>
+  </div>
+
+  <div id="dailyOverlay" class="settings-overlay" style="display:none;">
+    <div class="settings-card" style="text-align:center;">
+      <div class="settings-header">
+        <div class="section-title" style="margin:0;">🎁 Ежедневный бонус</div>
+        <button class="settings-close" id="dailyCloseBtn" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="daily-streak" id="dailyStreakLabel">Серия: 0 дн.</div>
+      <div class="daily-amount" id="dailyAmountLabel">+20</div>
+      <button class="spin-btn" id="dailyClaimBtn" style="margin-top:14px;">Забрать бонус</button>
+      <div class="result-msg" id="dailyMsg" style="margin-top:10px;"></div>
     </div>
   </div>
 
@@ -1081,7 +1118,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = "https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -2628,6 +2665,75 @@
     });
   }
 
+  // ---------- Ежедневный бонус ----------
+  var dailyStatus = { canClaim: false, secondsRemaining: 0, streak: 0, nextAmount: 20 };
+
+  function checkDailyDot(){
+    if (!canUseApi()) { document.getElementById("dailyDot").style.display = "none"; return; }
+    apiCall("/api/daily/state", {}, function(err, data){
+      if (err || !data) return;
+      dailyStatus = { canClaim: data.canClaim, secondsRemaining: data.secondsRemaining, streak: data.streak, nextAmount: data.nextAmount };
+      document.getElementById("dailyDot").style.display = data.canClaim ? "" : "none";
+    });
+  }
+
+  function renderDailyPanel(){
+    document.getElementById("dailyStreakLabel").textContent = "Серия: " + dailyStatus.streak + " дн.";
+    document.getElementById("dailyAmountLabel").textContent = "+" + dailyStatus.nextAmount;
+    var btn = document.getElementById("dailyClaimBtn");
+    var msg = document.getElementById("dailyMsg");
+    msg.className = "result-msg";
+    if (!canUseApi()) {
+      btn.disabled = true;
+      btn.textContent = "Доступно только через бота";
+      msg.textContent = "";
+    } else if (dailyStatus.canClaim) {
+      btn.disabled = false;
+      btn.textContent = "Забрать бонус";
+      msg.textContent = "";
+    } else {
+      btn.disabled = true;
+      var h = Math.floor(dailyStatus.secondsRemaining / 3600);
+      var m = Math.floor((dailyStatus.secondsRemaining % 3600) / 60);
+      btn.textContent = "Уже забрано";
+      msg.textContent = "Приходи через " + h + " ч " + m + " мин";
+    }
+  }
+
+  function openDailyPanel(){
+    document.getElementById("dailyOverlay").style.display = "flex";
+    if (!canUseApi()) { renderDailyPanel(); return; }
+    apiCall("/api/daily/state", {}, function(err, data){
+      if (!err && data) {
+        dailyStatus = { canClaim: data.canClaim, secondsRemaining: data.secondsRemaining, streak: data.streak, nextAmount: data.nextAmount };
+      }
+      renderDailyPanel();
+    });
+  }
+
+  function claimDaily(){
+    if (!dailyStatus.canClaim || !canUseApi()) return;
+    var btn = document.getElementById("dailyClaimBtn");
+    var msg = document.getElementById("dailyMsg");
+    btn.disabled = true;
+    apiCall("/api/daily/claim", {}, function(err, data){
+      if (err || !data || !data.success) {
+        msg.className = "result-msg lose";
+        msg.textContent = (data && data.message) ? data.message : "Не удалось забрать бонус";
+        btn.disabled = false;
+        return;
+      }
+      msg.className = "result-msg win pop";
+      msg.textContent = "Получено +" + data.amount + "! Серия: " + data.streak + " дн.";
+      applyBalance(data.balance, data.games_played, data.best_win, "win");
+      dailyStatus = { canClaim: false, secondsRemaining: DAILY_COOLDOWN_SECONDS_FALLBACK, streak: data.streak, nextAmount: dailyStatus.nextAmount };
+      document.getElementById("dailyDot").style.display = "none";
+      btn.textContent = "Уже забрано";
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+    });
+  }
+  var DAILY_COOLDOWN_SECONDS_FALLBACK = 24 * 3600;
+
   // ---------- Настройки ----------
   function renderSoundToggle(){
     var toggle = document.getElementById("soundToggle");
@@ -2664,8 +2770,18 @@
     if (e.target === this) this.style.display = "none";
   });
 
+  document.getElementById("dailyBtn").addEventListener("click", openDailyPanel);
+  document.getElementById("dailyCloseBtn").addEventListener("click", function(){
+    document.getElementById("dailyOverlay").style.display = "none";
+  });
+  document.getElementById("dailyOverlay").addEventListener("click", function(e){
+    if (e.target === this) this.style.display = "none";
+  });
+  document.getElementById("dailyClaimBtn").addEventListener("click", claimDaily);
+
   loadState(function(){
     renderBalance(false);
+    checkDailyDot();
     runLoader(function(){
       document.getElementById("loader").classList.add("hidden");
       document.getElementById("app").classList.add("revealed");
