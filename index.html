@@ -289,6 +289,64 @@
     word-break: break-all;
   }
 
+  /* ---------- Автоигра (краш / апгрейд) ---------- */
+  .auto-play-box {
+    background: var(--bg-1);
+    border: 1px solid var(--bg-2);
+    border-radius: var(--radius);
+    padding: clamp(12px, 3.5vw, 18px);
+    margin-top: clamp(14px, 4vw, 20px);
+  }
+  .auto-play-title {
+    font-size: clamp(13px, 3.4vw, 15px);
+    font-weight: 600;
+    margin-bottom: 10px;
+  }
+  .auto-play-fields {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .auto-play-field {
+    flex: 1 1 100px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .auto-play-field label {
+    font-size: clamp(10px, 2.6vw, 12px);
+    color: var(--text-1);
+  }
+  .auto-play-field input {
+    padding: 9px 10px;
+    border-radius: 8px;
+    background: var(--bg-2);
+    border: 1px solid transparent;
+    color: var(--text-0);
+    font-size: clamp(12px, 3.2vw, 14px);
+    font-family: inherit;
+    outline: none;
+  }
+  .auto-play-field input:focus { border-color: var(--gold); }
+  .spin-btn.secondary {
+    background: var(--bg-2);
+    color: var(--gold);
+    border: 1px solid var(--gold);
+  }
+  .spin-btn.secondary.active {
+    background: var(--danger);
+    color: #fff;
+    border-color: var(--danger);
+  }
+  .auto-play-status {
+    margin-top: 8px;
+    text-align: center;
+    font-size: clamp(11px, 2.8vw, 13px);
+    color: var(--text-1);
+    min-height: 16px;
+  }
+
   .balance-card {
     background: var(--bg-1);
     border: 1px solid var(--bg-2);
@@ -996,6 +1054,23 @@
     <div class="bet-row" id="crashBetRow"></div>
     <button class="spin-btn" id="crashActionBtn" disabled>Подождите...</button>
     <div class="result-msg" id="crashMsg"></div>
+
+    <div class="auto-play-box" id="crashAutoBox">
+      <div class="auto-play-title">🔁 Автоигра</div>
+      <div class="auto-play-fields">
+        <div class="auto-play-field">
+          <label>Вывод на ×</label>
+          <input type="number" id="crashAutoMult" min="1.01" step="0.1" value="2">
+        </div>
+        <div class="auto-play-field">
+          <label>Раундов</label>
+          <input type="number" id="crashAutoRounds" min="1" max="100" step="1" value="10">
+        </div>
+      </div>
+      <button class="spin-btn secondary" id="crashAutoToggle">▶ Запустить автоигру</button>
+      <div class="auto-play-status" id="crashAutoStatus"></div>
+    </div>
+
     <div class="footnote" style="margin-top:14px;">
       Большинство раундов обрываются до ×2. Очень редко множитель может дойти до максимума ×100 — но шанс на это крайне мал.
     </div>
@@ -1032,6 +1107,19 @@
     <div class="bet-row" id="upgradeBetRow"></div>
     <button class="spin-btn" id="upgradeActionBtn">⬆️ Прокачать</button>
     <div class="result-msg" id="upgradeMsg"></div>
+
+    <div class="auto-play-box" id="upgradeAutoBox">
+      <div class="auto-play-title">🔁 Автоигра</div>
+      <div class="auto-play-fields">
+        <div class="auto-play-field" style="flex:1 1 100%;">
+          <label>Количество раундов</label>
+          <input type="number" id="upgradeAutoRounds" min="1" max="100" step="1" value="10">
+        </div>
+      </div>
+      <button class="spin-btn secondary" id="upgradeAutoToggle">▶ Запустить автоигру</button>
+      <div class="auto-play-status" id="upgradeAutoStatus"></div>
+    </div>
+
     <div class="footnote" style="margin-top:14px;">
       Стрелка честно останавливается на случайном числе 0–100. Попал в золотую зону (твой шанс) — выигрыш, мимо — ставка сгорает. Чем меньше шанс, тем выше множитель.
     </div>
@@ -1191,7 +1279,7 @@
   // в демо-режиме: игры считаются локально в браузере со ставками "понарошку",
   // и баланс НЕ совпадает с ботом, и не сохраняется между открытиями.
   // ==========================================================================
-  var API_BASE_URL = https://roulette-club-production.up.railway.app"; // <-- замените после деплоя backend
+  var API_BASE_URL = "https://ВАШ-АДРЕС-СЕРВЕРА"; // <-- замените после деплоя backend
   var API_CONFIGURED = API_BASE_URL.indexOf("ВАШ-АДРЕС-СЕРВЕРА") === -1;
 
   var BET_OPTIONS = [10, 25, 50, 100];
@@ -1450,12 +1538,15 @@
     if (state.game === "crash") {
       state.spinning = false;
       stopMinesPolling();
+      if (typeof stopUpgradeAuto === "function" && upgradeAuto.active) stopUpgradeAuto("Автоигра остановлена (смена вкладки)");
       startCrashPolling();
       triggerPanelFade(document.getElementById("crashPanel"));
       return;
     }
     if (state.game === "mines") {
       state.spinning = false;
+      if (crashAuto.active) stopCrashAuto("Автоигра остановлена (смена вкладки)");
+      if (upgradeAuto.active) stopUpgradeAuto("Автоигра остановлена (смена вкладки)");
       stopCrashPolling();
       startMinesPolling();
       triggerPanelFade(document.getElementById("minesPanel"));
@@ -1463,6 +1554,7 @@
     }
     if (state.game === "upgrade") {
       state.spinning = false;
+      if (crashAuto.active) stopCrashAuto("Автоигра остановлена (смена вкладки)");
       stopCrashPolling();
       stopMinesPolling();
       renderUpgradeChanceRow();
@@ -1471,6 +1563,8 @@
       triggerPanelFade(document.getElementById("upgradePanel"));
       return;
     }
+    if (crashAuto.active) stopCrashAuto("Автоигра остановлена (смена вкладки)");
+    if (upgradeAuto.active) stopUpgradeAuto("Автоигра остановлена (смена вкладки)");
     stopCrashPolling();
     stopMinesPolling();
 
@@ -1998,6 +2092,7 @@
     myBetThisRound: false,
     cashedOutThisRound: false
   };
+  var crashAuto = { active: false, roundsLeft: 0, totalRounds: 0, targetMult: 2, betPlacedThisRound: false, roundIdAtBet: null };
 
   function renderCrashBetRow(){
     var row = document.getElementById("crashBetRow");
@@ -2127,7 +2222,93 @@
         btn.disabled = true;
         btn.textContent = "Новый раунд скоро...";
       }
+
+      handleCrashAuto(data, hasBet, cashedOut);
     });
+  }
+
+  // ---------- Автоигра: Краш ----------
+  function renderCrashAutoStatus(){
+    var el = document.getElementById("crashAutoStatus");
+    if (crashAuto.active) {
+      el.textContent = "Осталось раундов: " + crashAuto.roundsLeft + " из " + crashAuto.totalRounds + " · вывод на ×" + crashAuto.targetMult.toFixed(2);
+    } else {
+      el.textContent = "";
+    }
+  }
+
+  function startCrashAuto(){
+    var multInput = document.getElementById("crashAutoMult");
+    var roundsInput = document.getElementById("crashAutoRounds");
+    var targetMult = parseFloat(multInput.value);
+    var rounds = parseInt(roundsInput.value, 10);
+    if (!(targetMult > 1)) targetMult = 2;
+    if (!(rounds > 0)) rounds = 10;
+    rounds = Math.min(rounds, 100);
+
+    crashAuto.active = true;
+    crashAuto.targetMult = targetMult;
+    crashAuto.roundsLeft = rounds;
+    crashAuto.totalRounds = rounds;
+    crashAuto.betPlacedThisRound = false;
+    crashAuto.roundIdAtBet = null;
+
+    var btn = document.getElementById("crashAutoToggle");
+    btn.textContent = "⏹ Остановить автоигру";
+    btn.classList.add("active");
+    renderCrashAutoStatus();
+  }
+
+  function stopCrashAuto(statusText){
+    crashAuto.active = false;
+    var btn = document.getElementById("crashAutoToggle");
+    btn.textContent = "▶ Запустить автоигру";
+    btn.classList.remove("active");
+    document.getElementById("crashAutoStatus").textContent = statusText || "";
+  }
+
+  function toggleCrashAuto(){
+    if (crashAuto.active) {
+      stopCrashAuto("Автоигра остановлена");
+    } else {
+      startCrashAuto();
+    }
+  }
+
+  // Вызывается на каждом опросе раунда: сама ставит в ожидании и сама
+  // выводит, когда множитель достиг цели. Не трогает ничего, если
+  // автоигра выключена — обычная ручная игра работает как прежде.
+  function handleCrashAuto(data, hasBet, cashedOut){
+    if (!crashAuto.active) return;
+
+    if (data.phase === "waiting") {
+      if (!hasBet && crashAuto.roundIdAtBet !== data.roundId) {
+        crashAuto.roundIdAtBet = data.roundId;
+        crashPlaceBet();
+      }
+      return;
+    }
+
+    if (data.phase === "running" && hasBet && !cashedOut && data.multiplier >= crashAuto.targetMult) {
+      crashDoCashOut();
+      return;
+    }
+
+    if (data.phase === "crashed") {
+      // Раунд завершён (обрывом или уже выведенным выигрышем) — считаем
+      // его законченным для автоигры один раз за roundId.
+      if (crashAuto.roundIdAtBet === data.roundId) {
+        crashAuto.roundIdAtBet = null;
+        crashAuto.roundsLeft -= 1;
+        if (crashAuto.roundsLeft <= 0) {
+          stopCrashAuto("Автоигра завершена");
+        } else if (crashUI.bet > state.balance) {
+          stopCrashAuto("Автоигра остановлена: не хватает баланса");
+        } else {
+          renderCrashAutoStatus();
+        }
+      }
+    }
   }
 
   function crashPlaceBet(){
@@ -2427,6 +2608,7 @@
     customChanceActive: false,
     spinning: false
   };
+  var upgradeAuto = { active: false, roundsLeft: 0, totalRounds: 0 };
 
   function upgradeMultiplier(chance){
     chance = Math.max(UPGRADE_MIN_CHANCE, Math.min(UPGRADE_MAX_CHANCE, chance));
@@ -2664,7 +2846,62 @@
       upgradeUI.spinning = false;
       document.getElementById("upgradeActionBtn").disabled = false;
       needle.style.transition = ""; // вернуть резвый переход по умолчанию для переключения пресетов
+
+      if (upgradeAuto.active) {
+        upgradeAuto.roundsLeft -= 1;
+        if (upgradeAuto.roundsLeft <= 0 || upgradeUI.bet > state.balance) {
+          stopUpgradeAuto(upgradeAuto.roundsLeft <= 0 ? "Автоигра завершена" : "Автоигра остановлена: не хватает баланса");
+        } else {
+          document.getElementById("upgradeActionBtn").disabled = true; // блокируем до следующего авто-раунда
+          renderUpgradeAutoStatus();
+          setTimeout(function(){ if (upgradeAuto.active) upgradePlay(); }, 700);
+        }
+      }
     }, SPIN_DURATION_MS + 60);
+  }
+
+  // ---------- Автоигра: Апгрейд ----------
+  function renderUpgradeAutoStatus(){
+    var el = document.getElementById("upgradeAutoStatus");
+    if (upgradeAuto.active) {
+      el.textContent = "Осталось раундов: " + upgradeAuto.roundsLeft + " из " + upgradeAuto.totalRounds;
+    } else {
+      el.textContent = "";
+    }
+  }
+
+  function startUpgradeAuto(){
+    if (upgradeUI.spinning) return;
+    var roundsInput = document.getElementById("upgradeAutoRounds");
+    var rounds = parseInt(roundsInput.value, 10);
+    if (!(rounds > 0)) rounds = 10;
+    rounds = Math.min(rounds, 100);
+    upgradeAuto.active = true;
+    upgradeAuto.roundsLeft = rounds;
+    upgradeAuto.totalRounds = rounds;
+
+    var btn = document.getElementById("upgradeAutoToggle");
+    btn.textContent = "⏹ Остановить автоигру";
+    btn.classList.add("active");
+    renderUpgradeAutoStatus();
+    upgradePlay();
+  }
+
+  function stopUpgradeAuto(statusText){
+    upgradeAuto.active = false;
+    upgradeAuto.roundsLeft = 0;
+    var btn = document.getElementById("upgradeAutoToggle");
+    btn.textContent = "▶ Запустить автоигру";
+    btn.classList.remove("active");
+    document.getElementById("upgradeAutoStatus").textContent = statusText || "";
+  }
+
+  function toggleUpgradeAuto(){
+    if (upgradeAuto.active) {
+      stopUpgradeAuto("Автоигра остановлена");
+    } else {
+      startUpgradeAuto();
+    }
   }
 
   // ---------- Инициализация ----------
@@ -2686,6 +2923,8 @@
   document.getElementById("crashActionBtn").addEventListener("click", crashActionClick);
   document.getElementById("minesActionBtn").addEventListener("click", minesActionClick);
   document.getElementById("upgradeActionBtn").addEventListener("click", upgradePlay);
+  document.getElementById("crashAutoToggle").addEventListener("click", toggleCrashAuto);
+  document.getElementById("upgradeAutoToggle").addEventListener("click", toggleUpgradeAuto);
 
   // ---------- Топ игроков ----------
   var leaderboardMode = "balance";
