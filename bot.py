@@ -1,4 +1,5 @@
 """
+Telegram-бот: профили пользователей + мини-игры казино (виртуальная валюта) + анимации.
 
 ВАЖНО:
 - Это ИГРОВАЯ механика с виртуальными очками, НЕ имеющими денежной стоимости
@@ -112,7 +113,7 @@ API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
 # Можно перечислить несколько через запятую в переменной окружения BOT_ADMIN_IDS,
 # например: BOT_ADMIN_IDS="123456789,987654321"
 ADMIN_IDS = {
-    int(x) for x in os.getenv("BOT_ADMIN_IDS", "7222149724").split(",") if x.strip().isdigit()
+    int(x) for x in os.getenv("BOT_ADMIN_IDS", "").split(",") if x.strip().isdigit()
 }
 # Либо впиши ID прямо сюда, например: ADMIN_IDS = {123456789}
 
@@ -234,8 +235,9 @@ def finalize_round_payout(telegram_id: int, winnings: int, game: str = "unknown"
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             "UPDATE users SET balance = balance + ?, games_played = games_played + 1, "
+            "total_wagered = total_wagered + ?, "
             "best_win = CASE WHEN ? > best_win THEN ? ELSE best_win END WHERE telegram_id = ?",
-            (winnings, winnings, winnings, telegram_id),
+            (winnings, bet, winnings, winnings, telegram_id),
         )
         conn.commit()
         row = conn.execute(
@@ -547,6 +549,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN referral_count INTEGER NOT NULL DEFAULT 0")
         if "referral_earnings" not in existing_cols:
             conn.execute("ALTER TABLE users ADD COLUMN referral_earnings INTEGER NOT NULL DEFAULT 0")
+        if "total_wagered" not in existing_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN total_wagered INTEGER NOT NULL DEFAULT 0")
 
         conn.execute(
             """
@@ -671,6 +675,49 @@ def get_all_user_ids() -> list:
 
 # --- Реферальная система: приглашающий и приглашённый получают бонус,
 # но только один раз при первой регистрации приглашённого. ---
+# --- Уровни: растут вместе с общим оборотом ставок (сколько всего было
+# поставлено за всё время, независимо от исхода). Чисто статусная штука,
+# не даёт игровых преимуществ — только бейдж и прогресс в профиле. ---
+LEVELS = [
+    (0, "🥉 Новичок"),
+    (500, "🥈 Любитель"),
+    (2000, "🥇 Профи"),
+    (5000, "💎 Эксперт"),
+    (15000, "👑 Мастер"),
+    (50000, "🔥 Легенда"),
+    (150000, "⭐ VIP"),
+]
+
+
+def get_level_info(total_wagered: int):
+    """Возвращает (название_уровня, индекс, порог_текущего, порог_следующего
+    или None если максимум, прогресс_0_1)."""
+    current_index = 0
+    for i, (threshold, _name) in enumerate(LEVELS):
+        if total_wagered >= threshold:
+            current_index = i
+        else:
+            break
+
+    name = LEVELS[current_index][1]
+    current_threshold = LEVELS[current_index][0]
+    next_threshold = LEVELS[current_index + 1][0] if current_index + 1 < len(LEVELS) else None
+
+    if next_threshold is None:
+        progress = 1.0
+    else:
+        span = next_threshold - current_threshold
+        progress = (total_wagered - current_threshold) / span if span > 0 else 1.0
+
+    return {
+        "name": name,
+        "index": current_index,
+        "currentThreshold": current_threshold,
+        "nextThreshold": next_threshold,
+        "progress": max(0.0, min(1.0, progress)),
+    }
+
+
 REFERRAL_BONUS_REFERRER = 50
 REFERRAL_BONUS_REFERRED = 30
 
@@ -716,7 +763,7 @@ def get_leaderboard(order_by: str = "balance", limit: int = 10):
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            f"SELECT internal_id, first_name, username, balance, best_win, games_played "
+            f"SELECT internal_id, first_name, username, balance, best_win, games_played, total_wagered "
             f"FROM users WHERE banned = 0 ORDER BY {column} DESC, internal_id ASC LIMIT ?",
             (limit,),
         ).fetchall()
@@ -969,13 +1016,17 @@ def get_game_history(telegram_id: int, limit: int = 20):
 def settle(telegram_id: int, bet: int, winnings: int, game: str = "unknown"):
     delta = winnings - bet
     new_balance = update_balance(telegram_id, delta)
-    if winnings > 0:
-        with closing(sqlite3.connect(DB_PATH)) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE users SET total_wagered = total_wagered + ? WHERE telegram_id = ?",
+            (bet, telegram_id),
+        )
+        if winnings > 0:
             conn.execute(
                 "UPDATE users SET best_win = ? WHERE telegram_id = ? AND best_win < ?",
                 (winnings, telegram_id, winnings),
             )
-            conn.commit()
+        conn.commit()
     log_game_history(telegram_id, game, bet, winnings)
     return new_balance, delta
 
@@ -1074,6 +1125,14 @@ async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_user = update.effective_user
     user = get_or_create_user(tg_user.id, tg_user.username or "", tg_user.first_name or "")
+    level = get_level_info(user["total_wagered"])
+
+    filled = int(level["progress"] * 10)
+    bar = "▰" * filled + "▱" * (10 - filled)
+    if level["nextThreshold"] is None:
+        progress_line = f"{bar} максимальный уровень!"
+    else:
+        progress_line = f"{bar} {user['total_wagered']}/{level['nextThreshold']}"
 
     text = (
         f"👤 <b>Профиль</b>\n\n"
@@ -1081,6 +1140,9 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Имя: {user['first_name']}\n"
         f"💰 Баланс: <b>{user['balance']}</b> очков\n"
         f"🎮 Игр сыграно: {user['games_played']}\n"
+        f"🏅 Уровень: <b>{level['name']}</b>\n"
+        f"{progress_line}\n"
+        f"📊 Общий оборот ставок: {user['total_wagered']}\n"
         f"📅 Регистрация: {user['created_at'][:10]}"
     )
 
@@ -1116,6 +1178,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🎁 /daily — ежедневный бонус (от {DAILY_BASE_REWARD + DAILY_STREAK_STEP} очков, растёт с серией дней)\n"
         "📜 /history — последние 15 ставок\n"
         f"🤝 /ref — реферальная ссылка (+{REFERRAL_BONUS_REFERRER} тебе, +{REFERRAL_BONUS_REFERRED} другу)\n"
+        "🏅 Уровень растёт с общим оборотом ставок — смотри в /profile\n"
         "📩 /support текст — написать в поддержку (ответят прямо тут)\n\n"
         "ℹ️ Валюта в боте виртуальная, не имеет денежной ценности.\n"
         "В каждой игре есть реальный шанс проиграть ставку."
@@ -1769,6 +1832,7 @@ async def api_state(request):
             headers=_cors_headers(),
         )
 
+    level = get_level_info(user["total_wagered"])
     return web.json_response(
         {
             "internal_id": user["internal_id"],
@@ -1776,6 +1840,14 @@ async def api_state(request):
             "balance": user["balance"],
             "games_played": user["games_played"],
             "best_win": user["best_win"],
+            "level": {
+                "name": level["name"],
+                "index": level["index"],
+                "currentThreshold": level["currentThreshold"],
+                "nextThreshold": level["nextThreshold"],
+                "progress": level["progress"],
+                "totalWagered": user["total_wagered"],
+            },
         },
         headers=_cors_headers(),
     )
@@ -1882,6 +1954,7 @@ async def api_play(request):
 
     new_balance, delta = settle(telegram_id, bet, winnings, game=game)
     updated = get_user(telegram_id)
+    level = get_level_info(updated["total_wagered"])
     payload.update(
         {
             "bet": bet,
@@ -1890,6 +1963,14 @@ async def api_play(request):
             "balance": new_balance,
             "games_played": updated["games_played"],
             "best_win": updated["best_win"],
+            "level": {
+                "name": level["name"],
+                "index": level["index"],
+                "currentThreshold": level["currentThreshold"],
+                "nextThreshold": level["nextThreshold"],
+                "progress": level["progress"],
+                "totalWagered": updated["total_wagered"],
+            },
         }
     )
     return web.json_response(payload, headers=_cors_headers())
@@ -2163,6 +2244,7 @@ async def api_leaderboard(request):
             "balance": row["balance"],
             "bestWin": row["best_win"],
             "gamesPlayed": row["games_played"],
+            "level": get_level_info(row["total_wagered"])["name"],
         }
         for row in rows
     ]
